@@ -467,4 +467,3 @@ export class Compositor {
         this.drawToScreen(compFbo, clearColor);
     }
 }
-```

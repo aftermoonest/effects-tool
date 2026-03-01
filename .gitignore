@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local agent assets (do not publish)
+.agent/skills/
+.awesome-skills/
