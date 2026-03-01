@@ -127,6 +127,46 @@
   }
 }
 
+/* Canvas transform controls */
+.moveable-control-box .moveable-line {
+  background: color-mix(in srgb, var(--primary) 75%, #ffffff 25%);
+}
+
+.moveable-control-box .moveable-control {
+  width: 12px !important;
+  height: 12px !important;
+  margin-top: -6px !important;
+  margin-left: -6px !important;
+  border: 1px solid var(--background) !important;
+  background: var(--primary) !important;
+  border-radius: 2px !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 50%, #000000 50%);
+}
+
+.moveable-control-box .moveable-n,
+.moveable-control-box .moveable-s {
+  cursor: ns-resize !important;
+}
+
+.moveable-control-box .moveable-e,
+.moveable-control-box .moveable-w {
+  cursor: ew-resize !important;
+}
+
+.moveable-control-box .moveable-ne,
+.moveable-control-box .moveable-sw {
+  cursor: nesw-resize !important;
+}
+
+.moveable-control-box .moveable-nw,
+.moveable-control-box .moveable-se {
+  cursor: nwse-resize !important;
+}
+
+.moveable-gap {
+  background: color-mix(in srgb, var(--primary) 70%, #ffffff 30%) !important;
+}
+
 @layer base {
   * {
     @apply border-border;

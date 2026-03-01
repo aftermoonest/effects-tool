@@ -30,6 +30,9 @@ import {
     Upload,
     PanelLeftClose,
     PanelLeft,
+    Copy,
+    Pencil,
+    MoreHorizontal,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -38,6 +41,13 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import {
+    ContextMenu,
+    ContextMenuContent,
+    ContextMenuItem,
+    ContextMenuSeparator,
+    ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 
 // Icon for each layer kind
@@ -64,9 +74,16 @@ interface LayerRowProps {
     intent?: 'before' | 'after' | 'into' | null;
     isDropTarget?: boolean;
     isOverlay?: boolean;
+    maskedBy?: string | null; // name of the mask layer that affects this layer
+    onStartRename?: (id: string) => void;
+    isRenaming?: boolean;
+    renameValue?: string;
+    onRenameChange?: (value: string) => void;
+    onRenameCommit?: () => void;
+    onRenameCancel?: () => void;
 }
 
-const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay }: LayerRowProps) => {
+const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay, maskedBy, onStartRename, isRenaming, renameValue, onRenameChange, onRenameCommit, onRenameCancel }: LayerRowProps) => {
     const { attributes, listeners, setNodeRef: setDraggableRef, isDragging } = useDraggable({
         id: layer.id,
         data: { layer }
@@ -80,7 +97,17 @@ const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay }: L
     const setActiveLayer = useEditorStore(s => s.setActiveLayer);
     const toggleVisibility = useEditorStore(s => s.toggleLayerVisibility);
     const removeLayer = useEditorStore(s => s.removeLayer);
+    const duplicateLayer = useEditorStore(s => s.duplicateLayer);
     const toggleCollapsed = useEditorStore(s => s.toggleLayerCollapsed);
+
+    const renameInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (isRenaming && renameInputRef.current) {
+            renameInputRef.current.focus();
+            renameInputRef.current.select();
+        }
+    }, [isRenaming]);
 
     const Icon = LAYER_ICONS[layer.kind];
     const kindColor = KIND_COLORS[layer.kind];
@@ -104,12 +131,17 @@ const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay }: L
         }
     }
 
-    return (
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === 'Enter') onRenameCommit?.();
+        if (e.key === 'Escape') onRenameCancel?.();
+    };
+
+    const rowContent = (
         <div
             ref={setNodeRef}
             style={{ paddingLeft: `${12 + depth * 16}px` }}
             className={`
-                relative flex items-center gap-2 py-3 pr-2 border-b border-border/50 group cursor-pointer
+                relative flex items-center gap-2 py-3 pr-2 border-b border-border/50 group cursor-pointer overflow-hidden
                 transition-colors text-xs uppercase tracking-wider
                 ${isActive && !isOverlay ? 'bg-primary/10 border-l-2 border-l-primary' : 'hover:bg-secondary/30 border-l-2 border-l-transparent'}
                 ${!layer.visible && !isOverlay ? 'opacity-40' : ''}
@@ -145,10 +177,44 @@ const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay }: L
             {/* Kind icon */}
             <Icon size={14} className={`${kindColor} shrink-0`} />
 
-            {/* Name */}
-            <span className="flex-1 truncate font-bold text-xs pointer-events-none">
-                {layer.name}
-            </span>
+            {/* Name – inline rename overlays static label to avoid row resize */}
+            <div className="relative flex-1 min-w-0">
+                <span
+                    className={`block truncate font-bold text-xs select-none ${isRenaming && !isOverlay ? 'opacity-0 pointer-events-none' : 'pointer-events-auto'}`}
+                    onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        if (!isOverlay) onStartRename?.(layer.id);
+                    }}
+                >
+                    {layer.name}
+                </span>
+                {isRenaming && !isOverlay && (
+                    <input
+                        ref={renameInputRef}
+                        type="text"
+                        value={renameValue ?? ''}
+                        onChange={(e) => onRenameChange?.(e.target.value)}
+                        onKeyDown={handleKeyDown}
+                        onBlur={() => onRenameCommit?.()}
+                        onClick={(e) => e.stopPropagation()}
+                        className="absolute inset-0 w-full bg-secondary/50 border border-primary/50 rounded px-1.5 py-0 font-bold text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary uppercase tracking-wider"
+                    />
+                )}
+            </div>
+
+            {/* Mask badge */}
+            {layer.isMask && (
+                <span className="text-[9px] font-mono bg-purple-500/20 text-purple-400 px-1.5 py-0.5 border border-purple-500/30 shrink-0 pointer-events-none uppercase tracking-wider font-bold">
+                    mask{layer.invertMask ? ' inv' : ''}
+                </span>
+            )}
+
+            {/* Masked-by indicator */}
+            {maskedBy && !layer.isMask && (
+                <span className="text-[8px] font-mono text-purple-400/60 px-1 shrink-0 pointer-events-none truncate max-w-[60px]" title={`Masked by ${maskedBy}`}>
+                    ◈ {maskedBy}
+                </span>
+            )}
 
             {/* Effect count badge */}
             {layer.effects.length > 0 && (
@@ -167,16 +233,72 @@ const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay }: L
                 </button>
             )}
 
-            {/* Delete */}
+            {/* 3-dots menu */}
             {!isOverlay && (
-                <button
-                    className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity shrink-0 z-10 relative p-0.5"
-                    onClick={(e) => { e.stopPropagation(); removeLayer(layer.id); }}
-                >
-                    <Trash2 size={14} />
-                </button>
+                <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                        <button
+                            className="text-muted-foreground hover:text-foreground shrink-0 z-10 relative p-0.5"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <MoreHorizontal size={14} />
+                        </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-44">
+                        <DropdownMenuItem
+                            onClick={() => onStartRename?.(layer.id)}
+                            className="cursor-pointer text-xs font-bold uppercase tracking-wider gap-2"
+                        >
+                            <Pencil size={12} /> Rename
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                            onClick={() => duplicateLayer(layer.id)}
+                            className="cursor-pointer text-xs font-bold uppercase tracking-wider gap-2"
+                        >
+                            <Copy size={12} /> Duplicate
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                            onClick={() => removeLayer(layer.id)}
+                            className="cursor-pointer text-xs font-bold uppercase tracking-wider gap-2 text-destructive focus:text-destructive"
+                        >
+                            <Trash2 size={12} /> Delete
+                        </DropdownMenuItem>
+                    </DropdownMenuContent>
+                </DropdownMenu>
             )}
         </div>
+    );
+
+    // Wrap overlay rows without context menu
+    if (isOverlay) return rowContent;
+
+    return (
+        <ContextMenu>
+            <ContextMenuTrigger asChild>
+                {rowContent}
+            </ContextMenuTrigger>
+            <ContextMenuContent className="w-44">
+                <ContextMenuItem
+                    onClick={() => onStartRename?.(layer.id)}
+                    className="cursor-pointer text-xs font-bold uppercase tracking-wider gap-2"
+                >
+                    <Pencil size={12} /> Rename
+                </ContextMenuItem>
+                <ContextMenuItem
+                    onClick={() => duplicateLayer(layer.id)}
+                    className="cursor-pointer text-xs font-bold uppercase tracking-wider gap-2"
+                >
+                    <Copy size={12} /> Duplicate
+                </ContextMenuItem>
+                <ContextMenuSeparator />
+                <ContextMenuItem
+                    onClick={() => removeLayer(layer.id)}
+                    className="cursor-pointer text-xs font-bold uppercase tracking-wider gap-2 text-destructive focus:text-destructive"
+                >
+                    <Trash2 size={12} /> Delete
+                </ContextMenuItem>
+            </ContextMenuContent>
+        </ContextMenu>
     );
 };
 
@@ -215,11 +337,35 @@ export const LayerTree = () => {
     const addAdjustmentLayer = useEditorStore(s => s.addAdjustmentLayer);
     const addGroup = useEditorStore(s => s.addGroup);
     const addMaskLayer = useEditorStore(s => s.addMaskLayer);
+    const renameLayer = useEditorStore(s => s.renameLayer);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     const [activeDragId, setActiveDragId] = useState<string | null>(null);
     const [dropState, setDropState] = useState<{ overId: string; intent: 'before' | 'after' | 'into' } | null>(null);
+
+    // Rename state
+    const [renamingId, setRenamingId] = useState<string | null>(null);
+    const [renameValue, setRenameValue] = useState('');
+
+    const startRename = useCallback((id: string) => {
+        const layer = useEditorStore.getState().layers[id];
+        if (layer) {
+            setRenamingId(id);
+            setRenameValue(layer.name);
+        }
+    }, []);
+
+    const commitRename = useCallback(() => {
+        if (renamingId && renameValue.trim()) {
+            renameLayer(renamingId, renameValue.trim());
+        }
+        setRenamingId(null);
+    }, [renamingId, renameValue, renameLayer]);
+
+    const cancelRename = useCallback(() => {
+        setRenamingId(null);
+    }, []);
 
     const [width, setWidth] = useState(256);
     const [isMinimized, setIsMinimized] = useState(false);
@@ -325,13 +471,27 @@ export const LayerTree = () => {
         e.target.value = '';
     };
 
-    const buildRenderList = (): { layer: Layer; depth: number }[] => {
-        const list: { layer: Layer; depth: number }[] = [];
+    const buildRenderList = (): { layer: Layer; depth: number; maskedBy: string | null }[] => {
+        const list: { layer: Layer; depth: number; maskedBy: string | null }[] = [];
         const walk = (ids: string[], depth: number) => {
+            // First pass: find mask layers at this level
+            // A mask affects all layers below it until the next mask
+            const maskMap = new Map<string, string>(); // layerId -> maskName
+            let currentMask: string | null = null;
+            for (let i = 0; i < ids.length; i++) {
+                const layer = layers[ids[i]];
+                if (!layer) continue;
+                if (layer.isMask) {
+                    currentMask = layer.name;
+                } else if (currentMask) {
+                    maskMap.set(ids[i], currentMask);
+                }
+            }
+
             for (const id of ids) {
                 const layer = layers[id];
                 if (!layer) continue;
-                list.push({ layer, depth });
+                list.push({ layer, depth, maskedBy: maskMap.get(id) || null });
                 if (layer.kind === 'group' && !layer.collapsed && layer.children.length > 0) {
                     walk(layer.children, depth + 1);
                 }
@@ -393,7 +553,7 @@ export const LayerTree = () => {
                             onDragEnd={handleDragEnd}
                             onDragCancel={handleDragCancel}
                         >
-                            {renderList.map(({ layer, depth }) => {
+                            {renderList.map(({ layer, depth, maskedBy }) => {
                                 const isDropTarget = dropState?.overId === layer.id && activeDragId !== layer.id;
                                 return (
                                     <LayerRow
@@ -403,6 +563,13 @@ export const LayerTree = () => {
                                         depth={depth}
                                         isDropTarget={isDropTarget}
                                         intent={isDropTarget ? dropState.intent : null}
+                                        maskedBy={maskedBy}
+                                        onStartRename={startRename}
+                                        isRenaming={renamingId === layer.id}
+                                        renameValue={renamingId === layer.id ? renameValue : undefined}
+                                        onRenameChange={setRenameValue}
+                                        onRenameCommit={commitRename}
+                                        onRenameCancel={cancelRename}
                                     />
                                 );
                             })}

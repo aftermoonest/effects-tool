@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { PropertiesPanel } from './PropertiesPanel';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
-import { Settings2, Plus, Trash2, Eye, EyeOff, GripVertical, PanelRightClose, PanelRight, ChevronDown, ChevronRight } from 'lucide-react';
+import { Settings2, Plus, Trash2, Eye, EyeOff, GripVertical, PanelRightClose, PanelRight, ChevronDown, ChevronRight, RotateCcw, Copy, Search } from 'lucide-react';
 import { useEditorStore } from '@/store/editorStore';
 import type { Effect, EffectType } from '@/store/editorStore';
 import {
@@ -31,7 +31,7 @@ import { CSS } from '@dnd-kit/utilities';
 interface EffectDef {
     id: EffectType;
     label: string;
-    defaultParams: Record<string, number>;
+    defaultParams: Record<string, number | string | boolean>;
 }
 
 const AVAILABLE_EFFECTS: EffectDef[] = [
@@ -45,6 +45,14 @@ const AVAILABLE_EFFECTS: EffectDef[] = [
     { id: 'ripple', label: 'Ripple', defaultParams: { amplitude: 0.01, frequency: 10, phase: 0 } },
     { id: 'minimum', label: 'Minimum (Erode)', defaultParams: { radius: 1 } },
     { id: 'find_edges', label: 'Find Edges', defaultParams: { strength: 1 } },
+    { id: 'ascii', label: 'ASCII Art', defaultParams: { preset: 'Classic', characters: ' .:-=+*#%@', scale: 50, asciiGamma: 40, asciiPhase: 0, colorMode: 'Texture', background: false, bgColor: '#000000', textColor: '#ffffff', invertOrder: false } },
+    {
+        id: 'dithering', label: 'Dithering', defaultParams: {
+            pattern: 'F-S', colorMode: 'tritone', shadows: '#000000', midtones: '#ff4500', highlights: '#ffffff',
+            imagePreprocessing: false, preBlur: 0.5, preGrain: 0.1, preGamma: 1.0, preBlackPoint: 0, preWhitePoint: 255,
+            showEffect: true, pixelSize: 2, useColorMode: false, threshold: 128, transparentBg: false
+        }
+    },
 ];
 
 // Per-parameter slider configuration: [min, max, step]
@@ -68,8 +76,56 @@ const PARAM_RANGES: Record<string, [number, number, number]> = {
     frequency: [1, 50, 0.5],
     phase: [0, 6.28, 0.01],
     radius: [0.5, 5, 0.1],
-    strength: [0.5, 3, 0.01],
-    noiseAmount: [0, 1, 0.01],
+    scale: [0, 100, 1],
+    asciiGamma: [0, 100, 1],
+    asciiPhase: [0, 100, 1],
+    preBlur: [0, 5, 0.1],
+    preGrain: [0, 1, 0.01],
+    preGamma: [0.1, 4, 0.01],
+    preBlackPoint: [0, 255, 1],
+    preWhitePoint: [0, 255, 1],
+    pixelSize: [1, 20, 1],
+    threshold: [0, 255, 1],
+};
+
+const ASCII_PRESETS: Record<string, string> = {
+    'Classic': ' .:-=+*#%@', 'Minimal': ' .+', 'Binary': ' 01', 'Matrix': ' 01',
+    'Hex': ' 0123456789ABCDEF', 'Grades': ' FDCBA', 'Math': ' +-*/=', 'Punctuation': ' .,:;!?',
+    'Brackets': ' ()[]{}', 'Angles': ' <>^v', 'Slashes': ' /\\|', 'Quotes': ' `\'"',
+    'Alpha': ' ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'Lower': ' abcdefghijklmnopqrstuvwxyz',
+    'Numeric': ' 0123456789', 'Vowels': ' aeiou', 'Consonants': ' bcdfghjklmnpqrstvwxyz',
+    'Lines': ' -_~', 'Dense': ' WMB80@#%', 'Sparse': ' .:,', 'Stars': ' +*#', 'Mixed': ' .o0O'
+};
+
+const SliderParam = ({ label, paramKey, effect, layerId, val }: any) => {
+    const updateEffectParam = useEditorStore(s => s.updateEffectParam);
+    const [min, max, step] = PARAM_RANGES[paramKey] ?? [-1, 1, 0.01];
+    return (
+        <div className="space-y-2 mt-2">
+            <div className="flex justify-between items-center text-[10px]">
+                <span className="text-muted-foreground font-mono uppercase truncate mr-2">{label}</span>
+                <input
+                    type="number"
+                    value={Number(val?.toFixed(3) ?? 0)}
+                    min={min}
+                    max={max}
+                    step={step}
+                    onChange={(e) => {
+                        const v = e.target.value === '' ? 0 : parseFloat(e.target.value);
+                        updateEffectParam(layerId, effect.id, paramKey, v);
+                    }}
+                    className="w-14 bg-secondary/50 border border-border rounded px-1.5 py-0.5 text-right font-mono text-primary tabular-nums focus:outline-none focus:ring-1 focus:ring-primary focus:bg-secondary transition-colors"
+                />
+            </div>
+            <Slider
+                value={[val ?? 0]}
+                min={min}
+                max={max}
+                step={step}
+                onValueChange={(v) => updateEffectParam(layerId, effect.id, paramKey, v[0])}
+            />
+        </div>
+    );
 };
 
 // ─── Sortable Effect Card ───────────────────────────────────────────────
@@ -84,7 +140,10 @@ const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: effect.id });
     const toggleEffectVisibility = useEditorStore(s => s.toggleEffectVisibility);
     const removeEffect = useEditorStore(s => s.removeEffect);
+    const duplicateEffect = useEditorStore(s => s.duplicateEffect);
     const updateEffectParam = useEditorStore(s => s.updateEffectParam);
+    const setEffectBlendMode = useEditorStore(s => s.setEffectBlendMode);
+    const setEffectOpacity = useEditorStore(s => s.setEffectOpacity);
     const [isExpanded, setIsExpanded] = useState(true);
 
     const style = {
@@ -147,6 +206,15 @@ const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
                     {effect.visible ? <Eye size={14} /> : <EyeOff size={14} />}
                 </button>
 
+                {/* Duplicate */}
+                <button
+                    className="text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0 z-10 relative p-0.5"
+                    onClick={(e) => { e.stopPropagation(); duplicateEffect(layerId, effect.id); }}
+                    title="Duplicate effect"
+                >
+                    <Copy size={14} />
+                </button>
+
                 {/* Delete */}
                 <button
                     className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity shrink-0 z-10 relative p-0.5"
@@ -156,16 +224,159 @@ const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
                 </button>
             </div>
 
-            {/* Parameter sliders */}
+            {/* Parameter sliders and controls */}
             {effect.visible && isExpanded && (
-                <div className="space-y-4 px-4 pb-4 pt-1 bg-secondary/10 border-t border-border/10">
-                    {Object.entries(effect.params).map(([key, value]) => {
+                <div className="space-y-4 px-4 pb-4 pt-4 bg-secondary/10 border-t border-border/10">
+                    {/* Controls Row */}
+                    <div className="flex justify-between items-center pb-2 border-b border-border/10">
+                        <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                                <Button variant="outline" size="sm" className="h-6 text-[10px] px-2 font-mono uppercase tracking-wider">
+                                    Blend: {effect.blendMode}
+                                </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent className="text-xs font-mono uppercase tracking-widest min-w-[120px]">
+                                {['normal', 'multiply', 'screen', 'overlay', 'soft_light', 'hard_light', 'difference', 'exclusion', 'color_dodge', 'color_burn'].map(mode => (
+                                    <DropdownMenuItem
+                                        key={mode}
+                                        onClick={() => setEffectBlendMode(layerId, effect.id, mode as any)}
+                                        className="cursor-pointer hover:bg-primary hover:text-primary-foreground text-[10px]"
+                                    >
+                                        {mode}
+                                    </DropdownMenuItem>
+                                ))}
+                            </DropdownMenuContent>
+                        </DropdownMenu>
+
+                        <button
+                            className="flex items-center text-[10px] uppercase font-bold tracking-widest text-muted-foreground hover:text-foreground transition-colors"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                const defs = AVAILABLE_EFFECTS.find(e => e.id === effect.type)?.defaultParams;
+                                if (defs) {
+                                    Object.entries(defs).forEach(([k, v]) => {
+                                        updateEffectParam(layerId, effect.id, k, v);
+                                    });
+                                }
+                            }}
+                        >
+                            <RotateCcw size={12} className="mr-1.5" /> Reset
+                        </button>
+                    </div>
+
+                    <div className="space-y-2">
+                        <div className="flex justify-between items-center text-[10px]">
+                            <span className="text-muted-foreground font-mono uppercase truncate mr-2">opacity</span>
+                            <input
+                                type="number"
+                                value={Number((effect.opacity ?? 1).toFixed(3))}
+                                min={0}
+                                max={1}
+                                step={0.01}
+                                onChange={(e) => {
+                                    const val = e.target.value === '' ? 0 : parseFloat(e.target.value);
+                                    setEffectOpacity(layerId, effect.id, val);
+                                }}
+                                className="w-14 bg-secondary/50 border border-border rounded px-1.5 py-0.5 text-right font-mono text-primary tabular-nums focus:outline-none focus:ring-1 focus:ring-primary focus:bg-secondary transition-colors"
+                            />
+                        </div>
+                        <Slider
+                            value={[effect.opacity ?? 1]}
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            onValueChange={(val) => setEffectOpacity(layerId, effect.id, val[0])}
+                        />
+                    </div>
+
+                    {/* Generic param rendering */}
+                    {effect.type !== 'dithering' && Object.entries(effect.params).map(([key, value]) => {
+                        // Custom Controls for Dithering/ASCII (strings/booleans)
+                        if (typeof value === 'boolean') {
+                            return (
+                                <div key={key} className="flex justify-between items-center text-[10px] mt-2">
+                                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
+                                    <input
+                                        type="checkbox"
+                                        checked={value}
+                                        onChange={(e) => updateEffectParam(layerId, effect.id, key, e.target.checked)}
+                                        className="h-3 w-3 rounded border-border bg-secondary text-primary accent-primary"
+                                    />
+                                </div>
+                            );
+                        }
+
+                        if (typeof value === 'string') {
+                            if (key === 'characters') {
+                                return (
+                                    <div key={key} className="space-y-1 mt-2">
+                                        <div className="flex justify-between items-center text-[10px]">
+                                            <span className="text-muted-foreground font-mono uppercase truncate mr-2">{key}</span>
+                                        </div>
+                                        <input
+                                            type="text"
+                                            value={value}
+                                            onChange={(e) => updateEffectParam(layerId, effect.id, key, e.target.value)}
+                                            className="w-full bg-secondary/50 border border-border rounded px-2 py-1 font-mono text-primary text-[10px] focus:outline-none focus:ring-1 focus:ring-primary focus:bg-secondary transition-colors"
+                                        />
+                                    </div>
+                                );
+                            }
+
+                            if (key === 'preset' || key === 'colorMode' || key === 'algorithm') {
+                                let options: string[] = [];
+                                if (key === 'preset') options = Object.keys(ASCII_PRESETS);
+                                if (key === 'colorMode' && effect.type === 'ascii') options = ['Texture', 'Grayscale', 'Monochrome'];
+                                if (key === 'colorMode' && effect.type === 'dithering') options = ['monochrome', 'duotone', 'tritone'];
+                                if (key === 'algorithm') options = ['atkinson', 'bayer', 'floyd_steinberg'];
+
+                                return (
+                                    <div key={key} className="flex justify-between items-center text-[10px] mt-2">
+                                        <span className="text-muted-foreground font-mono uppercase truncate mr-2">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
+                                        <select
+                                            value={value}
+                                            onChange={(e) => {
+                                                const val = e.target.value;
+                                                updateEffectParam(layerId, effect.id, key, val);
+                                                if (key === 'preset' && ASCII_PRESETS[val]) {
+                                                    updateEffectParam(layerId, effect.id, 'characters', ASCII_PRESETS[val]);
+                                                }
+                                            }}
+                                            className="bg-secondary/50 border border-border rounded px-1.5 py-0.5 text-right font-mono text-primary focus:outline-none focus:ring-1 focus:ring-primary h-6 max-w-[120px]"
+                                        >
+                                            {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                        </select>
+                                    </div>
+                                );
+                            }
+
+                            if (key === 'shadows' || key === 'midtones' || key === 'highlights' || key === 'bgColor' || key === 'textColor') {
+                                if (effect.params.colorMode === 'monochrome' && (key === 'midtones' || key === 'highlights')) return null;
+                                if (effect.params.colorMode === 'duotone' && key === 'midtones') return null;
+                                if (effect.type === 'ascii' && key === 'bgColor' && !effect.params.background) return null;
+                                if (effect.type === 'ascii' && key === 'textColor' && effect.params.colorMode !== 'Monochrome') return null;
+
+                                return (
+                                    <div key={key} className="flex justify-between items-center text-[10px] mt-2">
+                                        <span className="text-muted-foreground font-mono uppercase truncate mr-2">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
+                                        <input
+                                            type="color"
+                                            value={value}
+                                            onChange={(e) => updateEffectParam(layerId, effect.id, key, e.target.value)}
+                                            className="h-5 w-8 p-0 border-0 rounded cursor-pointer bg-transparent"
+                                        />
+                                    </div>
+                                );
+                            }
+                            return null;
+                        }
+
                         if (typeof value !== 'number') return null;
                         const [min, max, step] = PARAM_RANGES[key] ?? [-1, 1, 0.01];
                         return (
-                            <div key={key} className="space-y-2">
+                            <div key={key} className="space-y-2 mt-2">
                                 <div className="flex justify-between items-center text-[10px]">
-                                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">{key}</span>
+                                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
                                     <input
                                         type="number"
                                         value={Number(value.toFixed(3))}
@@ -189,9 +400,133 @@ const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
                             </div>
                         );
                     })}
+
+                    {/* Custom Dithering UI */}
+                    {effect.type === 'dithering' && (
+                        <div className="space-y-4 mt-4">
+                            {/* Bypass Toggle */}
+                            <div className="flex justify-between items-center text-[10px]">
+                                <span className="text-muted-foreground font-mono uppercase truncate mr-2">Enable Effect</span>
+                                <input
+                                    type="checkbox"
+                                    checked={effect.params.showEffect as boolean}
+                                    onChange={(e) => updateEffectParam(layerId, effect.id, 'showEffect', e.target.checked)}
+                                    className="h-3 w-3 rounded border-border bg-secondary text-primary accent-primary"
+                                />
+                            </div>
+
+                            {/* Main algorithm/pattern selector */}
+                            <div className="space-y-1">
+                                <span className="text-muted-foreground font-mono uppercase text-[10px]">Pattern</span>
+                                <div className="flex bg-secondary/50 p-0.5 rounded border border-border">
+                                    {['F-S', 'Bayer', 'Random'].map(pat => (
+                                        <button
+                                            key={pat}
+                                            onClick={() => updateEffectParam(layerId, effect.id, 'pattern', pat)}
+                                            className={`flex-1 text-[10px] font-mono py-1 rounded transition-colors ${effect.params.pattern === pat ? 'bg-primary text-primary-foreground font-bold' : 'hover:bg-secondary text-muted-foreground'}`}
+                                        >
+                                            {pat}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <SliderParam label="Threshold" paramKey="threshold" effect={effect} layerId={layerId} val={effect.params.threshold as number} />
+                            <SliderParam label="Pixel Size" paramKey="pixelSize" effect={effect} layerId={layerId} val={effect.params.pixelSize as number} />
+
+                            {/* Color Mode Section */}
+                            <div className="pt-3 border-t border-border/10 space-y-2">
+                                <div className="flex justify-between items-center text-[10px]">
+                                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">Use Original Colors</span>
+                                    <input
+                                        type="checkbox"
+                                        checked={effect.params.useColorMode as boolean}
+                                        onChange={(e) => updateEffectParam(layerId, effect.id, 'useColorMode', e.target.checked)}
+                                        className="h-3 w-3 rounded border-border bg-secondary text-primary accent-primary"
+                                    />
+                                </div>
+                                {!effect.params.useColorMode && (
+                                    <div className="space-y-2 mt-2">
+                                        <div className="flex justify-between items-center text-[10px]">
+                                            <span className="text-muted-foreground font-mono uppercase truncate mr-2">Palette Mode</span>
+                                            <select
+                                                value={effect.params.colorMode as string}
+                                                onChange={(e) => updateEffectParam(layerId, effect.id, 'colorMode', e.target.value)}
+                                                className="bg-secondary/50 border border-border rounded px-1.5 py-0.5 text-right font-mono text-primary focus:outline-none focus:ring-1 focus:ring-primary h-6 max-w-[120px]"
+                                            >
+                                                {['monochrome', 'duotone', 'tritone'].map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                            </select>
+                                        </div>
+
+                                        {effect.params.colorMode === 'monochrome' && (
+                                            <div className="flex justify-between items-center text-[10px]">
+                                                <span className="text-muted-foreground font-mono uppercase truncate mr-2">Transparent Background</span>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={effect.params.transparentBg as boolean}
+                                                    onChange={(e) => updateEffectParam(layerId, effect.id, 'transparentBg', e.target.checked)}
+                                                    className="h-3 w-3 rounded border-border bg-secondary text-primary accent-primary"
+                                                />
+                                            </div>
+                                        )}
+
+                                        <div className="flex justify-between items-center text-[10px]">
+                                            <span className="text-muted-foreground font-mono uppercase truncate mr-2">{effect.params.transparentBg ? 'Color' : 'Shadows'}</span>
+                                            <input type="color" value={effect.params.shadows as string} onChange={(e) => updateEffectParam(layerId, effect.id, 'shadows', e.target.value)} className="h-5 w-8 p-0 border-0 rounded cursor-pointer bg-transparent" disabled={effect.params.colorMode === 'monochrome' && effect.params.transparentBg as boolean} style={{ opacity: effect.params.colorMode === 'monochrome' && effect.params.transparentBg ? 0.2 : 1 }} />
+                                        </div>
+                                        {effect.params.colorMode !== 'monochrome' && effect.params.colorMode !== 'duotone' && (
+                                            <div className="flex justify-between items-center text-[10px]">
+                                                <span className="text-muted-foreground font-mono uppercase truncate mr-2">Midtones</span>
+                                                <input type="color" value={effect.params.midtones as string} onChange={(e) => updateEffectParam(layerId, effect.id, 'midtones', e.target.value)} className="h-5 w-8 p-0 border-0 rounded cursor-pointer bg-transparent" />
+                                            </div>
+                                        )}
+                                        <div className="flex justify-between items-center text-[10px]">
+                                            <span className="text-muted-foreground font-mono uppercase truncate mr-2">{effect.params.transparentBg && effect.params.colorMode === 'monochrome' ? 'Color' : 'Highlights'}</span>
+                                            <input type="color" value={effect.params.highlights as string} onChange={(e) => updateEffectParam(layerId, effect.id, 'highlights', e.target.value)} className="h-5 w-8 p-0 border-0 rounded cursor-pointer bg-transparent" />
+                                        </div>
+                                        {/* Presets Grid */}
+                                        <div className="mt-3 grid grid-cols-2 gap-2 text-[9px] uppercase tracking-wider font-bold">
+                                            <button className="bg-secondary hover:bg-primary transition-colors hover:text-primary-foreground py-1 rounded"
+                                                onClick={() => { updateEffectParam(layerId, effect.id, 'shadows', '#000000'); updateEffectParam(layerId, effect.id, 'midtones', '#808080'); updateEffectParam(layerId, effect.id, 'highlights', '#ffffff'); }}>Minimal</button>
+                                            <button className="bg-secondary hover:bg-primary transition-colors hover:text-primary-foreground py-1 rounded"
+                                                onClick={() => { updateEffectParam(layerId, effect.id, 'shadows', '#43523d'); updateEffectParam(layerId, effect.id, 'midtones', '#8cb484'); updateEffectParam(layerId, effect.id, 'highlights', '#c7f0d8'); }}>Nokia</button>
+                                            <button className="bg-secondary hover:bg-primary transition-colors hover:text-primary-foreground py-1 rounded"
+                                                onClick={() => { updateEffectParam(layerId, effect.id, 'shadows', '#1b2f15'); updateEffectParam(layerId, effect.id, 'midtones', '#4c8742'); updateEffectParam(layerId, effect.id, 'highlights', '#b3e8a6'); }}>Garden</button>
+                                            <button className="bg-secondary hover:bg-primary transition-colors hover:text-primary-foreground py-1 rounded"
+                                                onClick={() => { updateEffectParam(layerId, effect.id, 'shadows', '#0a0a1a'); updateEffectParam(layerId, effect.id, 'midtones', '#4a4a8a'); updateEffectParam(layerId, effect.id, 'highlights', '#e0e0ff'); }}>Star</button>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Preprocessing Group */}
+                            <div className="pt-3 border-t border-border/10 space-y-2">
+                                <div className="flex justify-between items-center text-[10px]">
+                                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">Image Preprocessing</span>
+                                    <input
+                                        type="checkbox"
+                                        checked={effect.params.imagePreprocessing as boolean}
+                                        onChange={(e) => updateEffectParam(layerId, effect.id, 'imagePreprocessing', e.target.checked)}
+                                        className="h-3 w-3 rounded border-border bg-secondary text-primary accent-primary"
+                                    />
+                                </div>
+
+                                {effect.params.imagePreprocessing && (
+                                    <div className="space-y-4 mt-3 pl-3 border-l-2 border-border/20">
+                                        <SliderParam label="Pre-Blur" paramKey="preBlur" effect={effect} layerId={layerId} val={effect.params.preBlur as number} />
+                                        <SliderParam label="Pre-Grain" paramKey="preGrain" effect={effect} layerId={layerId} val={effect.params.preGrain as number} />
+                                        <SliderParam label="Gamma Factor" paramKey="preGamma" effect={effect} layerId={layerId} val={effect.params.preGamma as number} />
+                                        <SliderParam label="Black Point" paramKey="preBlackPoint" effect={effect} layerId={layerId} val={effect.params.preBlackPoint as number} />
+                                        <SliderParam label="White Point" paramKey="preWhitePoint" effect={effect} layerId={layerId} val={effect.params.preWhitePoint as number} />
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
                 </div>
-            )}
-        </div>
+            )
+            }
+        </div >
     );
 };
 
@@ -207,8 +542,10 @@ export const EffectsPanel = () => {
 
     const [width, setWidth] = useState(288);
     const [isMinimized, setIsMinimized] = useState(false);
-    const [activeTab, setActiveTab] = useState<'properties' | 'effects'>('properties');
+    const [effectSearch, setEffectSearch] = useState('');
+    const [effectMenuOpen, setEffectMenuOpen] = useState(false);
     const isResizing = useRef(false);
+    const searchInputRef = useRef<HTMLInputElement>(null);
 
     const startResizing = useCallback(() => {
         isResizing.current = true;
@@ -285,59 +622,48 @@ export const EffectsPanel = () => {
                     </div>
                 </div>
 
-                {!isMinimized && (
-                    <div className="flex w-full px-3 pb-3 gap-2">
-                        <button
-                            className={`flex-1 py-1.5 text-[10px] font-bold uppercase tracking-widest rounded transition-colors ${activeTab === 'properties' ? 'bg-primary text-primary-foreground' : 'bg-background border border-border text-muted-foreground hover:bg-secondary hover:text-foreground'}`}
-                            onClick={() => setActiveTab('properties')}
-                        >
-                            Properties
-                        </button>
-                        <button
-                            className={`flex-1 py-1.5 text-[10px] font-bold uppercase tracking-widest rounded transition-colors ${activeTab === 'effects' ? 'bg-primary text-primary-foreground' : 'bg-background border border-border text-muted-foreground hover:bg-secondary hover:text-foreground'}`}
-                            onClick={() => setActiveTab('effects')}
-                        >
-                            Effects
-                        </button>
-                    </div>
-                )}
+                {/* Removed tabs */}
             </div>
 
             {/* Content */}
             {!isMinimized ? (
                 <div className="flex-1 overflow-y-auto w-full relative">
-                    {activeTab === 'properties' ? (
-                        <PropertiesPanel />
-                    ) : !activeLayer ? (
-                        <div className="text-muted-foreground text-center py-8 font-mono uppercase tracking-wider border border-dashed border-border m-3 text-[10px]">
-                            Select a layer
-                        </div>
-                    ) : activeLayer.effects.length === 0 ? (
-                        <div className="text-muted-foreground text-center py-8 font-mono uppercase tracking-wider border border-dashed border-border m-3 text-[10px]">
-                            <Settings2 size={16} className="mx-auto mb-2 text-muted-foreground/50" />
-                            No effects on<br />
-                            <span className="text-foreground">{activeLayer.name}</span>
-                        </div>
-                    ) : (
-                        <DndContext
-                            sensors={sensors}
-                            collisionDetection={closestCenter}
-                            onDragEnd={handleDragEnd}
-                        >
-                            <SortableContext
-                                items={activeLayer.effects.map(e => e.id)}
-                                strategy={verticalListSortingStrategy}
-                            >
-                                {activeLayer.effects.map((effect, index) => (
-                                    <SortableEffectCard
-                                        key={effect.id}
-                                        effect={effect}
-                                        layerId={activeLayer.id}
-                                        index={index}
-                                    />
-                                ))}
-                            </SortableContext>
-                        </DndContext>
+                    <PropertiesPanel />
+                    {activeLayer && (
+                        <>
+                            <div className="bg-secondary/30 px-4 py-2 border-y border-border flex items-center gap-2">
+                                <h3 className="font-bold text-[10px] uppercase tracking-widest text-muted-foreground">Effects</h3>
+                            </div>
+                            {activeLayer.effects.length === 0 ? (
+                                <div className="text-muted-foreground text-center py-8 font-mono uppercase tracking-wider border border-dashed border-border m-3 text-[10px]">
+                                    <Settings2 size={16} className="mx-auto mb-2 text-muted-foreground/50" />
+                                    No effects on<br />
+                                    <span className="text-foreground">{activeLayer.name}</span>
+                                </div>
+                            ) : (
+                                <div className="pb-16 flex flex-col">
+                                    <DndContext
+                                        sensors={sensors}
+                                        collisionDetection={closestCenter}
+                                        onDragEnd={handleDragEnd}
+                                    >
+                                        <SortableContext
+                                            items={activeLayer.effects.map(e => e.id)}
+                                            strategy={verticalListSortingStrategy}
+                                        >
+                                            {activeLayer.effects.map((effect, index) => (
+                                                <SortableEffectCard
+                                                    key={effect.id}
+                                                    effect={effect}
+                                                    layerId={activeLayer.id}
+                                                    index={index}
+                                                />
+                                            ))}
+                                        </SortableContext>
+                                    </DndContext>
+                                </div>
+                            )}
+                        </>
                     )}
                 </div>
             ) : (
@@ -347,24 +673,51 @@ export const EffectsPanel = () => {
             )}
 
             {/* Footer Action */}
-            {!isMinimized && activeLayer && activeTab === 'effects' && (
-                <div className="p-3 border-t border-border bg-secondary/30 flex justify-center w-full relative z-20">
-                    <DropdownMenu>
+            {!isMinimized && activeLayer && (
+                <div className="p-3 border-t border-border bg-secondary/30 flex justify-center w-full relative z-20 shrink-0">
+                    <DropdownMenu open={effectMenuOpen} onOpenChange={(open) => {
+                        setEffectMenuOpen(open);
+                        if (open) {
+                            setEffectSearch('');
+                            setTimeout(() => searchInputRef.current?.focus(), 0);
+                        }
+                    }}>
                         <DropdownMenuTrigger asChild>
                             <Button variant="outline" className="w-full text-xs font-bold uppercase tracking-wider">
                                 <Plus size={14} className="mr-2" /> Add Effect
                             </Button>
                         </DropdownMenuTrigger>
-                        <DropdownMenuContent side="top" align="center" className="w-48 bg-card border-border max-h-[400px] overflow-y-auto">
-                            {AVAILABLE_EFFECTS.map((effect) => (
-                                <DropdownMenuItem
-                                    key={effect.id}
-                                    onClick={() => addEffectToLayer(activeLayer.id, effect.id, effect.defaultParams)}
-                                    className="cursor-pointer hover:bg-primary hover:text-primary-foreground font-bold text-xs uppercase tracking-wider"
-                                >
-                                    {effect.label}
-                                </DropdownMenuItem>
-                            ))}
+                        <DropdownMenuContent side="top" align="center" className="w-56 bg-card border-border max-h-[400px] overflow-y-auto">
+                            <div className="p-1.5 sticky top-0 bg-card z-10 border-b border-border/50">
+                                <div className="relative">
+                                    <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                                    <input
+                                        ref={searchInputRef}
+                                        type="text"
+                                        placeholder="Search effects…"
+                                        value={effectSearch}
+                                        onChange={(e) => setEffectSearch(e.target.value)}
+                                        onKeyDown={(e) => e.stopPropagation()}
+                                        className="w-full bg-secondary/50 border border-border rounded pl-7 pr-2 py-1.5 text-xs font-mono placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary focus:bg-secondary transition-colors"
+                                    />
+                                </div>
+                            </div>
+                            {AVAILABLE_EFFECTS
+                                .filter(e => e.label.toLowerCase().includes(effectSearch.toLowerCase()))
+                                .map((effect) => (
+                                    <DropdownMenuItem
+                                        key={effect.id}
+                                        onClick={() => addEffectToLayer(activeLayer.id, effect.id, effect.defaultParams)}
+                                        className="cursor-pointer hover:bg-primary hover:text-primary-foreground font-bold text-xs uppercase tracking-wider"
+                                    >
+                                        {effect.label}
+                                    </DropdownMenuItem>
+                                ))}
+                            {AVAILABLE_EFFECTS.filter(e => e.label.toLowerCase().includes(effectSearch.toLowerCase())).length === 0 && (
+                                <div className="text-center text-muted-foreground text-[10px] py-4 font-mono uppercase tracking-wider">
+                                    No effects found
+                                </div>
+                            )}
                         </DropdownMenuContent>
                     </DropdownMenu>
                 </div>

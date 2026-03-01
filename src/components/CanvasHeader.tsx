@@ -16,6 +16,8 @@ export const CanvasHeader = () => {
     const canvasHeight = useEditorStore(s => s.canvasHeight);
     const canvasBgColor = useEditorStore(s => s.canvasBgColor);
     const canvasTransparent = useEditorStore(s => s.canvasTransparent);
+    const layerOrder = useEditorStore(s => s.layerOrder);
+    const layers = useEditorStore(s => s.layers);
     const setCanvasSize = useEditorStore(s => s.setCanvasSize);
     const setCanvasBg = useEditorStore(s => s.setCanvasBg);
 
@@ -38,6 +40,21 @@ export const CanvasHeader = () => {
         }
     };
 
+    const hasImageLayer = layerOrder.some(id => layers[id]?.kind === 'image');
+
+    const handleExport = () => {
+        const canvas = document.getElementById('webgl-canvas') as HTMLCanvasElement | null;
+        if (!canvas || canvas.width <= 1 || canvas.height <= 1) {
+            return;
+        }
+
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const link = document.createElement('a');
+        link.download = `effects-export-${timestamp}.png`;
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+    };
+
     return (
         <header className="h-14 border-b border-border flex items-center justify-between px-6 bg-card shrink-0 uppercase tracking-widest text-xs font-bold w-full">
             <div className="flex items-center gap-4">
@@ -54,7 +71,7 @@ export const CanvasHeader = () => {
                         onChange={e => setW(e.target.value)}
                         onBlur={handleApplySize}
                         onKeyDown={e => e.key === 'Enter' && handleApplySize()}
-                        className="w-16 bg-secondary/50 border border-border rounded px-2 py-1 text-foreground focus:outline-none focus:ring-1 focus:ring-primary text-center appearance-none tabular-nums"
+                        className="w-24 bg-secondary/50 border border-border rounded px-2 py-1 text-foreground focus:outline-none focus:ring-1 focus:ring-primary text-center appearance-none tabular-nums"
                     />
                     <span className="text-[10px] ml-2">H:</span>
                     <input
@@ -63,7 +80,7 @@ export const CanvasHeader = () => {
                         onChange={e => setH(e.target.value)}
                         onBlur={handleApplySize}
                         onKeyDown={e => e.key === 'Enter' && handleApplySize()}
-                        className="w-16 bg-secondary/50 border border-border rounded px-2 py-1 text-foreground focus:outline-none focus:ring-1 focus:ring-primary text-center appearance-none tabular-nums"
+                        className="w-24 bg-secondary/50 border border-border rounded px-2 py-1 text-foreground focus:outline-none focus:ring-1 focus:ring-primary text-center appearance-none tabular-nums"
                     />
 
                     <DropdownMenu>
@@ -109,7 +126,11 @@ export const CanvasHeader = () => {
             </div>
 
             <div className="flex items-center gap-4">
-                <button className="bg-primary text-primary-foreground px-4 py-1.5 hover:bg-primary/90 transition-colors uppercase font-bold tracking-wider rounded-sm text-xs">
+                <button
+                    onClick={handleExport}
+                    disabled={!hasImageLayer}
+                    className="bg-primary text-primary-foreground px-4 py-1.5 hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors uppercase font-bold tracking-wider rounded-sm text-xs"
+                >
                     Export
                 </button>
             </div>

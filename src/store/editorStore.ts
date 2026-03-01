@@ -16,7 +16,8 @@ export type EffectType =
     | 'ripple'
     | 'minimum'
     | 'find_edges'
-    | 'ascii';
+    | 'ascii'
+    | 'dithering';
 
 export type BlendMode =
     | 'normal'
@@ -34,7 +35,7 @@ export type LayerKind = 'image' | 'adjustment' | 'group' | 'mask';
 
 // Generic uniform bag — each effect populates its own keys
 export interface EffectParams {
-    [key: string]: number | number[] | boolean;
+    [key: string]: number | number[] | boolean | string;
 }
 
 export interface Effect {
@@ -66,6 +67,18 @@ export interface Layer {
     sourceImage?: HTMLImageElement;
     imageWidth?: number;
     imageHeight?: number;
+    // Mask properties (image layers only)
+    isMask?: boolean;       // when true, this image layer acts as an alpha mask
+    invertMask?: boolean;   // when true, invert the mask alpha
+}
+
+export interface LayerTransformSnapshot {
+    [layerId: string]: {
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+    };
 }
 
 // ----------------------------------------------------------------------
@@ -89,6 +102,11 @@ export interface EditorState {
     panX: number;
     panY: number;
 
+    // Transform behavior
+    transformUndoStack: LayerTransformSnapshot[];
+    transformRedoStack: LayerTransformSnapshot[];
+    transformSessionStart: LayerTransformSnapshot | null;
+
     // Global trigger for WebGL re-renders
     renderTrigger: number;
 }
@@ -100,12 +118,15 @@ export interface EditorActions {
     addGroup: (name?: string) => void;
     addMaskLayer: (name?: string) => void;
     removeLayer: (id: string) => void;
+    duplicateLayer: (id: string) => void;
     setActiveLayer: (id: string | null) => void;
     toggleLayerVisibility: (id: string) => void;
     renameLayer: (id: string, name: string) => void;
     setLayerOpacity: (id: string, opacity: number) => void;
     setLayerBlendMode: (id: string, mode: BlendMode) => void;
     toggleLayerCollapsed: (id: string) => void;
+    toggleLayerMask: (id: string) => void;
+    toggleLayerInvertMask: (id: string) => void;
 
     // Layer ordering (DnD)
     moveLayerToPosition: (activeId: string, overId: string, intent: 'before' | 'after' | 'into') => void;
@@ -113,15 +134,26 @@ export interface EditorActions {
     // Effect CRUD (scoped to a layer)
     addEffectToLayer: (layerId: string, effectType: EffectType, defaultParams?: EffectParams) => void;
     removeEffect: (layerId: string, effectId: string) => void;
+    duplicateEffect: (layerId: string, effectId: string) => void;
     toggleEffectVisibility: (layerId: string, effectId: string) => void;
     setEffectBlendMode: (layerId: string, effectId: string, mode: BlendMode) => void;
     setEffectOpacity: (layerId: string, effectId: string, opacity: number) => void;
-    updateEffectParam: (layerId: string, effectId: string, paramKey: string, value: number | number[] | boolean) => void;
+    updateEffectParam: (layerId: string, effectId: string, paramKey: string, value: number | number[] | boolean | string) => void;
     reorderEffects: (layerId: string, fromIndex: number, toIndex: number) => void;
 
     // Layer transforms
+    setLayerTransform: (
+        id: string,
+        updates: Partial<Pick<Layer, 'x' | 'y' | 'width' | 'height'>>,
+        options?: { minSize?: number }
+    ) => void;
     setLayerPosition: (id: string, x: number, y: number) => void;
-    setLayerSize: (id: string, width: number, height: number) => void;
+    setLayerSize: (id: string, width: number, height: number, options?: { minSize?: number }) => void;
+    beginTransformSession: () => void;
+    commitTransformSession: () => void;
+    cancelTransformSession: () => void;
+    undoTransform: () => void;
+    redoTransform: () => void;
 
     // Viewport
     setZoom: (zoom: number) => void;
@@ -144,6 +176,10 @@ export type EditorStore = EditorState & EditorActions;
 // ----------------------------------------------------------------------
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
+const DEFAULT_CANVAS_WIDTH = 1920;
+const DEFAULT_CANVAS_HEIGHT = 1080;
+const DEFAULT_MIN_LAYER_SIZE = 8;
+const MAX_TRANSFORM_HISTORY = 100;
 
 let layerCounter = 0;
 const nextLayerName = (kind: LayerKind, customName?: string): string => {
@@ -157,6 +193,72 @@ const nextLayerName = (kind: LayerKind, customName?: string): string => {
     }
 };
 
+const toFiniteNumber = (value: number, fallback: number): number => {
+    return Number.isFinite(value) ? value : fallback;
+};
+
+const captureLayerTransforms = (layers: Record<string, Layer>): LayerTransformSnapshot => {
+    const snapshot: LayerTransformSnapshot = {};
+    for (const [id, layer] of Object.entries(layers)) {
+        snapshot[id] = {
+            x: layer.x,
+            y: layer.y,
+            width: layer.width,
+            height: layer.height,
+        };
+    }
+    return snapshot;
+};
+
+const snapshotsEqual = (a: LayerTransformSnapshot, b: LayerTransformSnapshot): boolean => {
+    const aKeys = Object.keys(a);
+    const bKeys = Object.keys(b);
+    if (aKeys.length !== bKeys.length) return false;
+    for (const key of aKeys) {
+        const va = a[key];
+        const vb = b[key];
+        if (!vb) return false;
+        if (va.x !== vb.x || va.y !== vb.y || va.width !== vb.width || va.height !== vb.height) {
+            return false;
+        }
+    }
+    return true;
+};
+
+const applyLayerTransforms = (layers: Record<string, Layer>, snapshot: LayerTransformSnapshot): Record<string, Layer> => {
+    let changed = false;
+    const nextLayers: Record<string, Layer> = {};
+
+    for (const [id, layer] of Object.entries(layers)) {
+        const transform = snapshot[id];
+        if (!transform) {
+            nextLayers[id] = layer;
+            continue;
+        }
+
+        if (
+            layer.x === transform.x
+            && layer.y === transform.y
+            && layer.width === transform.width
+            && layer.height === transform.height
+        ) {
+            nextLayers[id] = layer;
+            continue;
+        }
+
+        changed = true;
+        nextLayers[id] = {
+            ...layer,
+            x: transform.x,
+            y: transform.y,
+            width: transform.width,
+            height: transform.height,
+        };
+    }
+
+    return changed ? nextLayers : layers;
+};
+
 // ----------------------------------------------------------------------
 // Store
 // ----------------------------------------------------------------------
@@ -167,13 +269,16 @@ export const useEditorStore = create<EditorStore>()(
         layers: {},
         layerOrder: [],
         activeLayerId: null,
-        canvasWidth: 0,
-        canvasHeight: 0,
+        canvasWidth: DEFAULT_CANVAS_WIDTH,
+        canvasHeight: DEFAULT_CANVAS_HEIGHT,
         canvasBgColor: '#000000',
         canvasTransparent: true,
         zoom: 1,
         panX: 0,
         panY: 0,
+        transformUndoStack: [],
+        transformRedoStack: [],
+        transformSessionStart: null,
         renderTrigger: 0,
 
         // =====================================================================
@@ -203,12 +308,19 @@ export const useEditorStore = create<EditorStore>()(
             };
             set((state) => {
                 const newLayers = { ...state.layers, [id]: layer };
-                // If this is the first image, set canvas dimensions
-                const isFirst = Object.values(state.layers).filter(l => l.kind === 'image').length === 0;
+                const isFirstImage = Object.values(state.layers).filter(l => l.kind === 'image').length === 0;
+                const hasCanvasSize = state.canvasWidth > 0 && state.canvasHeight > 0;
 
-                // If it's the first image, center it on the new canvas, otherwise center on current canvas
-                const targetW = isFirst ? img.width : state.canvasWidth;
-                const targetH = isFirst ? img.height : state.canvasHeight;
+                // Keep an explicit canvas size; only fall back to image dimensions if canvas size is unset.
+                const targetW = isFirstImage && !hasCanvasSize ? img.width : state.canvasWidth;
+                const targetH = isFirstImage && !hasCanvasSize ? img.height : state.canvasHeight;
+
+                const scaleX = targetW / img.width;
+                const scaleY = targetH / img.height;
+                const scale = Math.max(scaleX, scaleY);
+
+                layer.width = img.width * scale;
+                layer.height = img.height * scale;
 
                 layer.x = (targetW - layer.width) / 2;
                 layer.y = (targetH - layer.height) / 2;
@@ -339,6 +451,70 @@ export const useEditorStore = create<EditorStore>()(
             };
         }),
 
+        duplicateLayer: (id) => set((state) => {
+            const source = state.layers[id];
+            if (!source) return state;
+
+            const newLayers = { ...state.layers };
+            const idMap = new Map<string, string>(); // old -> new
+
+            // Deep-clone a layer (and recursively its children for groups)
+            const cloneLayer = (srcId: string, newParentId: string | null): string => {
+                const src = state.layers[srcId];
+                if (!src) return srcId;
+                const newId = generateId();
+                idMap.set(srcId, newId);
+
+                // Clone children recursively
+                const newChildren: string[] = [];
+                if (src.kind === 'group') {
+                    for (const childId of src.children) {
+                        newChildren.push(cloneLayer(childId, newId));
+                    }
+                }
+
+                // Clone effects with new IDs
+                const newEffects = src.effects.map(e => ({
+                    ...e,
+                    id: generateId(),
+                    params: { ...e.params },
+                }));
+
+                newLayers[newId] = {
+                    ...src,
+                    id: newId,
+                    name: `${src.name} copy`,
+                    children: newChildren,
+                    parentId: newParentId,
+                    effects: newEffects,
+                };
+
+                return newId;
+            };
+
+            const newId = cloneLayer(id, source.parentId);
+
+            // Insert right after the original in its container
+            let newOrder = [...state.layerOrder];
+            if (source.parentId && newLayers[source.parentId]) {
+                const parent = newLayers[source.parentId];
+                const idx = parent.children.indexOf(id);
+                const newChildren = [...parent.children];
+                newChildren.splice(idx + 1, 0, newId);
+                newLayers[source.parentId] = { ...parent, children: newChildren };
+            } else {
+                const idx = newOrder.indexOf(id);
+                newOrder.splice(idx + 1, 0, newId);
+            }
+
+            return {
+                layers: newLayers,
+                layerOrder: newOrder,
+                activeLayerId: newId,
+                renderTrigger: state.renderTrigger + 1,
+            };
+        }),
+
         setActiveLayer: (id) => set({ activeLayerId: id }),
 
         toggleLayerVisibility: (id) => set((state) => {
@@ -381,6 +557,25 @@ export const useEditorStore = create<EditorStore>()(
             if (!layer) return state;
             return {
                 layers: { ...state.layers, [id]: { ...layer, collapsed: !layer.collapsed } },
+            };
+        }),
+
+        toggleLayerMask: (id) => set((state) => {
+            const layer = state.layers[id];
+            if (!layer || layer.kind !== 'image') return state;
+            const newIsMask = !layer.isMask;
+            return {
+                layers: { ...state.layers, [id]: { ...layer, isMask: newIsMask, invertMask: newIsMask ? layer.invertMask : false } },
+                renderTrigger: state.renderTrigger + 1,
+            };
+        }),
+
+        toggleLayerInvertMask: (id) => set((state) => {
+            const layer = state.layers[id];
+            if (!layer || !layer.isMask) return state;
+            return {
+                layers: { ...state.layers, [id]: { ...layer, invertMask: !layer.invertMask } },
+                renderTrigger: state.renderTrigger + 1,
             };
         }),
 
@@ -501,6 +696,28 @@ export const useEditorStore = create<EditorStore>()(
             };
         }),
 
+        duplicateEffect: (layerId, effectId) => set((state) => {
+            const layer = state.layers[layerId];
+            if (!layer) return state;
+            const idx = layer.effects.findIndex(e => e.id === effectId);
+            if (idx === -1) return state;
+            const source = layer.effects[idx];
+            const newEffect = {
+                ...source,
+                id: generateId(),
+                params: { ...source.params },
+            };
+            const newEffects = [...layer.effects];
+            newEffects.splice(idx + 1, 0, newEffect);
+            return {
+                layers: {
+                    ...state.layers,
+                    [layerId]: { ...layer, effects: newEffects },
+                },
+                renderTrigger: state.renderTrigger + 1,
+            };
+        }),
+
         toggleEffectVisibility: (layerId, effectId) => set((state) => {
             const layer = state.layers[layerId];
             if (!layer) return state;
@@ -592,21 +809,133 @@ export const useEditorStore = create<EditorStore>()(
         // Layer transforms
         // =====================================================================
 
-        setLayerPosition: (id, x, y) => set((state) => {
+        setLayerTransform: (id, updates, options) => set((state) => {
             const layer = state.layers[id];
             if (!layer) return state;
+
+            const minSize = Math.max(options?.minSize ?? DEFAULT_MIN_LAYER_SIZE, 1);
+
+            let nextX = toFiniteNumber(updates.x ?? layer.x, layer.x);
+            let nextY = toFiniteNumber(updates.y ?? layer.y, layer.y);
+            let nextWidth = Math.max(toFiniteNumber(updates.width ?? layer.width, layer.width), minSize);
+            let nextHeight = Math.max(toFiniteNumber(updates.height ?? layer.height, layer.height), minSize);
+
+            if (
+                nextX === layer.x
+                && nextY === layer.y
+                && nextWidth === layer.width
+                && nextHeight === layer.height
+            ) {
+                return state;
+            }
+
             return {
-                layers: { ...state.layers, [id]: { ...layer, x, y } },
+                layers: {
+                    ...state.layers,
+                    [id]: {
+                        ...layer,
+                        x: nextX,
+                        y: nextY,
+                        width: nextWidth,
+                        height: nextHeight,
+                    },
+                },
                 renderTrigger: state.renderTrigger + 1,
             };
         }),
 
-        setLayerSize: (id, width, height) => set((state) => {
-            const layer = state.layers[id];
-            if (!layer) return state;
+        setLayerPosition: (id, x, y) => {
+            get().setLayerTransform(id, { x, y });
+        },
+
+        setLayerSize: (id, width, height, options) => {
+            get().setLayerTransform(id, { width, height }, options);
+        },
+
+        beginTransformSession: () => set((state) => {
+            if (state.transformSessionStart) return state;
             return {
-                layers: { ...state.layers, [id]: { ...layer, width, height } },
-                renderTrigger: state.renderTrigger + 1,
+                transformSessionStart: captureLayerTransforms(state.layers),
+            };
+        }),
+
+        commitTransformSession: () => set((state) => {
+            const sessionStart = state.transformSessionStart;
+            if (!sessionStart) return state;
+
+            const current = captureLayerTransforms(state.layers);
+            if (snapshotsEqual(sessionStart, current)) {
+                return { transformSessionStart: null };
+            }
+
+            const nextUndo = [...state.transformUndoStack, sessionStart];
+            if (nextUndo.length > MAX_TRANSFORM_HISTORY) {
+                nextUndo.splice(0, nextUndo.length - MAX_TRANSFORM_HISTORY);
+            }
+
+            return {
+                transformUndoStack: nextUndo,
+                transformRedoStack: [],
+                transformSessionStart: null,
+            };
+        }),
+
+        cancelTransformSession: () => set((state) => {
+            const sessionStart = state.transformSessionStart;
+            if (!sessionStart) return state;
+            const restoredLayers = applyLayerTransforms(state.layers, sessionStart);
+            const changed = restoredLayers !== state.layers;
+
+            return {
+                layers: restoredLayers,
+                transformSessionStart: null,
+                renderTrigger: changed ? state.renderTrigger + 1 : state.renderTrigger,
+            };
+        }),
+
+        undoTransform: () => set((state) => {
+            if (state.transformUndoStack.length === 0) return state;
+
+            const current = captureLayerTransforms(state.layers);
+            const previous = state.transformUndoStack[state.transformUndoStack.length - 1];
+            const restoredLayers = applyLayerTransforms(state.layers, previous);
+            const changed = restoredLayers !== state.layers;
+
+            const nextUndo = state.transformUndoStack.slice(0, -1);
+            const nextRedo = [...state.transformRedoStack, current];
+            if (nextRedo.length > MAX_TRANSFORM_HISTORY) {
+                nextRedo.splice(0, nextRedo.length - MAX_TRANSFORM_HISTORY);
+            }
+
+            return {
+                layers: restoredLayers,
+                transformUndoStack: nextUndo,
+                transformRedoStack: nextRedo,
+                transformSessionStart: null,
+                renderTrigger: changed ? state.renderTrigger + 1 : state.renderTrigger,
+            };
+        }),
+
+        redoTransform: () => set((state) => {
+            if (state.transformRedoStack.length === 0) return state;
+
+            const current = captureLayerTransforms(state.layers);
+            const next = state.transformRedoStack[state.transformRedoStack.length - 1];
+            const restoredLayers = applyLayerTransforms(state.layers, next);
+            const changed = restoredLayers !== state.layers;
+
+            const nextRedo = state.transformRedoStack.slice(0, -1);
+            const nextUndo = [...state.transformUndoStack, current];
+            if (nextUndo.length > MAX_TRANSFORM_HISTORY) {
+                nextUndo.splice(0, nextUndo.length - MAX_TRANSFORM_HISTORY);
+            }
+
+            return {
+                layers: restoredLayers,
+                transformUndoStack: nextUndo,
+                transformRedoStack: nextRedo,
+                transformSessionStart: null,
+                renderTrigger: changed ? state.renderTrigger + 1 : state.renderTrigger,
             };
         }),
 

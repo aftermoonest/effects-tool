@@ -27,6 +27,21 @@ void main() {
 }
 `;
 
+// Vertex shader for positioned image blits:
+// position controls on-canvas placement, while uv stays local to the image.
+export const positionedImageVertexShader = `
+precision mediump float;
+attribute vec2 position;
+attribute vec2 uv;
+varying vec2 vUv;
+
+void main() {
+  // Flip Y for HTML image textures (top-left origin).
+  vUv = vec2(uv.x, 1.0 - uv.y);
+  gl_Position = vec4(position, 0, 1);
+}
+`;
+
 // A simple passthrough fragment shader, used for simply drawing a texture to the screen
 export const passthroughFragmentShader = `
 precision mediump float;
@@ -39,315 +54,172 @@ void main() {
 `;
 
 // ----------------------------------------------------------------------
-// Effect Shaders (The actual image math)
+// Effect Blending — Mixes original with effect using opacity and blend mode
 // ----------------------------------------------------------------------
-
-export const brightnessContrastShader = `
+export const blendEffectShader = `
 precision mediump float;
-uniform sampler2D tInput;
-uniform float brightness; // Range: -1.0 to 1.0
-uniform float contrast;   // Range: -1.0 to 1.0
+uniform sampler2D tOriginal;
+uniform sampler2D tEffect;
+uniform float opacity;
+uniform int blendMode;
 varying vec2 vUv;
 
-void main() {
-  vec4 color = texture2D(tInput, vUv);
-  
-  // Apply Brightness
-  color.rgb += brightness;
-  
-  // Apply Contrast
-  if (contrast > 0.0) {
-    color.rgb = (color.rgb - 0.5) / (1.0 - contrast) + 0.5;
-  } else {
-    color.rgb = (color.rgb - 0.5) * (1.0 + contrast) + 0.5;
-  }
-  
-  gl_FragColor = color;
-}
-`;
-
-export const blackWhiteShader = `
-precision mediump float;
-uniform sampler2D tInput;
-varying vec2 vUv;
-
-void main() {
-  vec4 color = texture2D(tInput, vUv);
-  
-  // Standard luminance dot product representation for human eye
-  float luminance = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-  
-  gl_FragColor = vec4(vec3(luminance), color.a);
-}
-`;
-
-// ----------------------------------------------------------------------
-// Levels — Input/output range remap
-// ----------------------------------------------------------------------
-export const levelsShader = `
-precision mediump float;
-uniform sampler2D tInput;
-uniform float inBlack;   // 0.0 – 1.0  (default 0)
-uniform float inWhite;   // 0.0 – 1.0  (default 1)
-uniform float gamma;     // 0.1 – 4.0  (default 1)
-uniform float outBlack;  // 0.0 – 1.0  (default 0)
-uniform float outWhite;  // 0.0 – 1.0  (default 1)
-varying vec2 vUv;
-
-void main() {
-  vec4 color = texture2D(tInput, vUv);
-
-  // Input range remap
-  vec3 c = clamp((color.rgb - inBlack) / max(inWhite - inBlack, 0.001), 0.0, 1.0);
-
-  // Gamma correction
-  c = pow(c, vec3(1.0 / max(gamma, 0.01)));
-
-  // Output range remap
-  c = mix(vec3(outBlack), vec3(outWhite), c);
-
-  gl_FragColor = vec4(c, color.a);
-}
-`;
-
-// ----------------------------------------------------------------------
-// Curves — Simplified S-curve using cubic Bezier approximation
-// ----------------------------------------------------------------------
-export const curvesShader = `
-precision mediump float;
-uniform sampler2D tInput;
-uniform float shadows;    // -1.0 – 1.0  lift/push shadows
-uniform float midtones;   // -1.0 – 1.0  adjust midtone gamma
-uniform float highlights; // -1.0 – 1.0  lift/pull highlights
-varying vec2 vUv;
-
-void main() {
-  vec4 color = texture2D(tInput, vUv);
-
-  // Apply per-channel tone adjustments using a simplified power curve
-  vec3 c = color.rgb;
-
-  // Shadows: bias low values
-  c = c + shadows * (1.0 - c) * c;
-
-  // Midtones: gamma shift
-  float midGamma = 1.0 / max(1.0 + midtones, 0.01);
-  c = pow(c, vec3(midGamma));
-
-  // Highlights: bias high values
-  c = c + highlights * c * c;
-
-  gl_FragColor = vec4(clamp(c, 0.0, 1.0), color.a);
-}
-`;
-
-// ----------------------------------------------------------------------
-// Selective Color — HSL range isolation + per-channel adjust
-// ----------------------------------------------------------------------
-export const selectiveColorShader = `
-precision mediump float;
-uniform sampler2D tInput;
-uniform float hueCenter;   // 0.0 – 1.0  target hue (e.g. 0.0 = red)
-uniform float hueRange;    // 0.0 – 0.5  selection width
-uniform float satShift;    // -1.0 – 1.0
-uniform float lumShift;    // -1.0 – 1.0
-varying vec2 vUv;
-
-vec3 rgb2hsl(vec3 c) {
-  float mx = max(max(c.r, c.g), c.b);
-  float mn = min(min(c.r, c.g), c.b);
-  float l = (mx + mn) * 0.5;
-  float s = 0.0;
-  float h = 0.0;
-  if (mx != mn) {
-    float d = mx - mn;
-    s = l > 0.5 ? d / (2.0 - mx - mn) : d / (mx + mn);
-    if (mx == c.r) h = (c.g - c.b) / d + (c.g < c.b ? 6.0 : 0.0);
-    else if (mx == c.g) h = (c.b - c.r) / d + 2.0;
-    else h = (c.r - c.g) / d + 4.0;
-    h /= 6.0;
-  }
-  return vec3(h, s, l);
-}
-
-float hue2rgb(float p, float q, float t) {
-  if (t < 0.0) t += 1.0;
-  if (t > 1.0) t -= 1.0;
-  if (t < 1.0/6.0) return p + (q - p) * 6.0 * t;
-  if (t < 1.0/2.0) return q;
-  if (t < 2.0/3.0) return p + (q - p) * (2.0/3.0 - t) * 6.0;
-  return p;
-}
-
-vec3 hsl2rgb(vec3 hsl) {
-  float h = hsl.x, s = hsl.y, l = hsl.z;
-  if (s == 0.0) return vec3(l);
-  float q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;
-  float p = 2.0 * l - q;
+// Blend mode implementations
+vec3 blendNormal(vec3 base, vec3 blend) { return blend; }
+vec3 blendMultiply(vec3 base, vec3 blend) { return base * blend; }
+vec3 blendScreen(vec3 base, vec3 blend) { return 1.0 - ((1.0 - base) * (1.0 - blend)); }
+vec3 blendOverlay(vec3 base, vec3 blend) {
   return vec3(
-    hue2rgb(p, q, h + 1.0/3.0),
-    hue2rgb(p, q, h),
-    hue2rgb(p, q, h - 1.0/3.0)
+    base.r < 0.5 ? (2.0 * base.r * blend.r) : (1.0 - 2.0 * (1.0 - base.r) * (1.0 - blend.r)),
+    base.g < 0.5 ? (2.0 * base.g * blend.g) : (1.0 - 2.0 * (1.0 - base.g) * (1.0 - blend.g)),
+    base.b < 0.5 ? (2.0 * base.b * blend.b) : (1.0 - 2.0 * (1.0 - base.b) * (1.0 - blend.b))
+  );
+}
+vec3 blendSoftLight(vec3 base, vec3 blend) {
+  return vec3(
+    blend.r < 0.5 ? (2.0 * base.r * blend.r + base.r * base.r * (1.0 - 2.0 * blend.r)) : (sqrt(base.r) * (2.0 * blend.r - 1.0) + 2.0 * base.r * (1.0 - blend.r)),
+    blend.g < 0.5 ? (2.0 * base.g * blend.g + base.g * base.g * (1.0 - 2.0 * blend.g)) : (sqrt(base.g) * (2.0 * blend.g - 1.0) + 2.0 * base.g * (1.0 - blend.g)),
+    blend.b < 0.5 ? (2.0 * base.b * blend.b + base.b * base.b * (1.0 - 2.0 * blend.b)) : (sqrt(base.b) * (2.0 * blend.b - 1.0) + 2.0 * base.b * (1.0 - blend.b))
+  );
+}
+vec3 blendHardLight(vec3 base, vec3 blend) { return blendOverlay(blend, base); }
+vec3 blendDifference(vec3 base, vec3 blend) { return abs(base - blend); }
+vec3 blendExclusion(vec3 base, vec3 blend) { return base + blend - 2.0 * base * blend; }
+vec3 blendColorDodge(vec3 base, vec3 blend) {
+  return vec3(
+    blend.r == 1.0 ? 1.0 : min(1.0, base.r / (1.0 - blend.r)),
+    blend.g == 1.0 ? 1.0 : min(1.0, base.g / (1.0 - blend.g)),
+    blend.b == 1.0 ? 1.0 : min(1.0, base.b / (1.0 - blend.b))
+  );
+}
+vec3 blendColorBurn(vec3 base, vec3 blend) {
+  return vec3(
+    blend.r == 0.0 ? 0.0 : max(0.0, 1.0 - (1.0 - base.r) / blend.r),
+    blend.g == 0.0 ? 0.0 : max(0.0, 1.0 - (1.0 - base.g) / blend.g),
+    blend.b == 0.0 ? 0.0 : max(0.0, 1.0 - (1.0 - base.b) / blend.b)
   );
 }
 
 void main() {
-  vec4 color = texture2D(tInput, vUv);
-  vec3 hsl = rgb2hsl(color.rgb);
+    vec4 orig = texture2D(tOriginal, vUv);
+    vec4 eff = texture2D(tEffect, vUv);
+    
+    vec3 blended;
+  if (blendMode == 0) blended = blendNormal(orig.rgb, eff.rgb);
+  else if (blendMode == 1) blended = blendMultiply(orig.rgb, eff.rgb);
+  else if (blendMode == 2) blended = blendScreen(orig.rgb, eff.rgb);
+  else if (blendMode == 3) blended = blendOverlay(orig.rgb, eff.rgb);
+  else if (blendMode == 4) blended = blendSoftLight(orig.rgb, eff.rgb);
+  else if (blendMode == 5) blended = blendHardLight(orig.rgb, eff.rgb);
+  else if (blendMode == 6) blended = blendDifference(orig.rgb, eff.rgb);
+  else if (blendMode == 7) blended = blendExclusion(orig.rgb, eff.rgb);
+  else if (blendMode == 8) blended = blendColorDodge(orig.rgb, eff.rgb);
+  else if (blendMode == 9) blended = blendColorBurn(orig.rgb, eff.rgb);
+  else blended = eff.rgb;
+    
+    vec3 finalColor = mix(orig.rgb, blended, opacity);
 
-  // Compute circular hue distance
-  float dist = abs(hsl.x - hueCenter);
-  dist = min(dist, 1.0 - dist);
-
-  // Smooth selection mask
-  float mask = 1.0 - smoothstep(hueRange * 0.5, hueRange, dist);
-  mask *= hsl.y; // Weight by saturation so grays aren't affected
-
-  hsl.y = clamp(hsl.y + satShift * mask, 0.0, 1.0);
-  hsl.z = clamp(hsl.z + lumShift * mask, 0.0, 1.0);
-
-  gl_FragColor = vec4(hsl2rgb(hsl), color.a);
+  gl_FragColor = vec4(finalColor, orig.a);
 }
 `;
 
 // ----------------------------------------------------------------------
-// Unsharp Mask — Gaussian blur → subtract → sharpen
+// Layer Blending — Composites a layer onto the composite FBO with blend mode + opacity
 // ----------------------------------------------------------------------
-export const unsharpMaskShader = `
+export const blendLayerShader = `
 precision mediump float;
-uniform sampler2D tInput;
-uniform vec2 texelSize;  // 1.0 / vec2(width, height)
-uniform float amount;    // 0.0 – 3.0
-uniform float radius;    // 0.5 – 5.0  (controls blur kernel spread)
+uniform sampler2D tBase;
+uniform sampler2D tLayer;
+uniform float opacity;
+uniform int blendMode;
 varying vec2 vUv;
 
+vec3 blendNormal(vec3 base, vec3 blend) { return blend; }
+vec3 blendMultiply(vec3 base, vec3 blend) { return base * blend; }
+vec3 blendScreen(vec3 base, vec3 blend) { return 1.0 - ((1.0 - base) * (1.0 - blend)); }
+vec3 blendOverlay(vec3 base, vec3 blend) {
+  return vec3(
+    base.r < 0.5 ? (2.0 * base.r * blend.r) : (1.0 - 2.0 * (1.0 - base.r) * (1.0 - blend.r)),
+    base.g < 0.5 ? (2.0 * base.g * blend.g) : (1.0 - 2.0 * (1.0 - base.g) * (1.0 - blend.g)),
+    base.b < 0.5 ? (2.0 * base.b * blend.b) : (1.0 - 2.0 * (1.0 - base.b) * (1.0 - blend.b))
+  );
+}
+vec3 blendSoftLight(vec3 base, vec3 blend) {
+  return vec3(
+    blend.r < 0.5 ? (2.0 * base.r * blend.r + base.r * base.r * (1.0 - 2.0 * blend.r)) : (sqrt(base.r) * (2.0 * blend.r - 1.0) + 2.0 * base.r * (1.0 - blend.r)),
+    blend.g < 0.5 ? (2.0 * base.g * blend.g + base.g * base.g * (1.0 - 2.0 * blend.g)) : (sqrt(base.g) * (2.0 * blend.g - 1.0) + 2.0 * base.g * (1.0 - blend.g)),
+    blend.b < 0.5 ? (2.0 * base.b * blend.b + base.b * base.b * (1.0 - 2.0 * blend.b)) : (sqrt(base.b) * (2.0 * blend.b - 1.0) + 2.0 * base.b * (1.0 - blend.b))
+  );
+}
+vec3 blendHardLight(vec3 base, vec3 blend) { return blendOverlay(blend, base); }
+vec3 blendDifference(vec3 base, vec3 blend) { return abs(base - blend); }
+vec3 blendExclusion(vec3 base, vec3 blend) { return base + blend - 2.0 * base * blend; }
+vec3 blendColorDodge(vec3 base, vec3 blend) {
+  return vec3(
+    blend.r == 1.0 ? 1.0 : min(1.0, base.r / (1.0 - blend.r)),
+    blend.g == 1.0 ? 1.0 : min(1.0, base.g / (1.0 - blend.g)),
+    blend.b == 1.0 ? 1.0 : min(1.0, base.b / (1.0 - blend.b))
+  );
+}
+vec3 blendColorBurn(vec3 base, vec3 blend) {
+  return vec3(
+    blend.r == 0.0 ? 0.0 : max(0.0, 1.0 - (1.0 - base.r) / blend.r),
+    blend.g == 0.0 ? 0.0 : max(0.0, 1.0 - (1.0 - base.g) / blend.g),
+    blend.b == 0.0 ? 0.0 : max(0.0, 1.0 - (1.0 - base.b) / blend.b)
+  );
+}
+
 void main() {
-  vec4 original = texture2D(tInput, vUv);
-
-  // 9-tap Gaussian blur approximation
-  vec4 blur = vec4(0.0);
-  float r = radius;
-  blur += texture2D(tInput, vUv + vec2(-r, -r) * texelSize) * 0.0625;
-  blur += texture2D(tInput, vUv + vec2( 0.0, -r) * texelSize) * 0.125;
-  blur += texture2D(tInput, vUv + vec2( r, -r) * texelSize) * 0.0625;
-  blur += texture2D(tInput, vUv + vec2(-r,  0.0) * texelSize) * 0.125;
-  blur += texture2D(tInput, vUv) * 0.25;
-  blur += texture2D(tInput, vUv + vec2( r,  0.0) * texelSize) * 0.125;
-  blur += texture2D(tInput, vUv + vec2(-r,  r) * texelSize) * 0.0625;
-  blur += texture2D(tInput, vUv + vec2( 0.0,  r) * texelSize) * 0.125;
-  blur += texture2D(tInput, vUv + vec2( r,  r) * texelSize) * 0.0625;
-
-  // Unsharp mask = original + amount * (original - blur)
-  vec4 sharpened = original + amount * (original - blur);
-
-  gl_FragColor = vec4(clamp(sharpened.rgb, 0.0, 1.0), original.a);
+    vec4 base = texture2D(tBase, vUv);
+    vec4 layer = texture2D(tLayer, vUv);
+    
+    float layerAlpha = layer.a * opacity;
+    
+    vec3 blended;
+    if (blendMode == 0) blended = blendNormal(base.rgb, layer.rgb);
+    else if (blendMode == 1) blended = blendMultiply(base.rgb, layer.rgb);
+    else if (blendMode == 2) blended = blendScreen(base.rgb, layer.rgb);
+    else if (blendMode == 3) blended = blendOverlay(base.rgb, layer.rgb);
+    else if (blendMode == 4) blended = blendSoftLight(base.rgb, layer.rgb);
+    else if (blendMode == 5) blended = blendHardLight(base.rgb, layer.rgb);
+    else if (blendMode == 6) blended = blendDifference(base.rgb, layer.rgb);
+    else if (blendMode == 7) blended = blendExclusion(base.rgb, layer.rgb);
+    else if (blendMode == 8) blended = blendColorDodge(base.rgb, layer.rgb);
+    else if (blendMode == 9) blended = blendColorBurn(base.rgb, layer.rgb);
+    else blended = layer.rgb;
+    
+    vec3 finalRgb = mix(base.rgb, blended, layerAlpha);
+    float finalAlpha = layerAlpha + base.a * (1.0 - layerAlpha);
+    
+    gl_FragColor = vec4(finalRgb, finalAlpha);
 }
 `;
 
 // ----------------------------------------------------------------------
-// Add Noise — Pseudo-random per-pixel GLSL noise
+// Mask Application — Uses mask's luminance * alpha to clip composite
 // ----------------------------------------------------------------------
-export const addNoiseShader = `
+export const applyMaskShader = `
 precision mediump float;
 uniform sampler2D tInput;
-uniform float noiseAmount;  // 0.0 – 1.0
-uniform float seed;         // Animated seed for variation
-varying vec2 vUv;
-
-// Hash-based pseudo random
-float random(vec2 st) {
-  return fract(sin(dot(st.xy, vec2(12.9898, 78.233))) * 43758.5453123);
-}
-
-void main() {
-  vec4 color = texture2D(tInput, vUv);
-
-  float noise = random(vUv + seed) * 2.0 - 1.0;
-  color.rgb += noise * noiseAmount;
-
-  gl_FragColor = vec4(clamp(color.rgb, 0.0, 1.0), color.a);
-}
-`;
-
-// ----------------------------------------------------------------------
-// Ripple — UV displacement via sine wave
-// ----------------------------------------------------------------------
-export const rippleShader = `
-precision mediump float;
-uniform sampler2D tInput;
-uniform float amplitude;   // 0.0 – 0.05  pixel displacement strength
-uniform float frequency;   // 1.0 – 50.0  wave frequency
-uniform float phase;       // 0.0 – 6.28  animation offset
+uniform sampler2D tMask;
+uniform int invertMask;
 varying vec2 vUv;
 
 void main() {
-  vec2 uv = vUv;
-
-  // Horizontal + vertical sine displacement
-  uv.x += sin(uv.y * frequency + phase) * amplitude;
-  uv.y += cos(uv.x * frequency + phase) * amplitude;
-
-  gl_FragColor = texture2D(tInput, clamp(uv, 0.0, 1.0));
-}
-`;
-
-// ----------------------------------------------------------------------
-// Minimum (Erode) — Morphological: select darkest neighbor
-// ----------------------------------------------------------------------
-export const minimumShader = `
-precision mediump float;
-uniform sampler2D tInput;
-uniform vec2 texelSize;  // 1.0 / vec2(width, height)
-uniform float radius;    // 1.0 – 5.0
-varying vec2 vUv;
-
-void main() {
-  vec4 minColor = texture2D(tInput, vUv);
-
-  // Sample 3x3 neighborhood
-  for (float x = -1.0; x <= 1.0; x += 1.0) {
-    for (float y = -1.0; y <= 1.0; y += 1.0) {
-      vec2 offset = vec2(x, y) * texelSize * radius;
-      vec4 s = texture2D(tInput, vUv + offset);
-      minColor = min(minColor, s);
+    vec4 comp = texture2D(tInput, vUv);
+    vec4 mask = texture2D(tMask, vUv);
+    
+    // Use luminance weighted by alpha as the mask value
+    // This works for both:
+    // - Opaque images (JPEG): luminance drives the mask (white=visible, black=masked)
+    // - Transparent images (PNG): alpha channel contributes naturally
+    float lum = dot(mask.rgb, vec3(0.299, 0.587, 0.114));
+    float maskValue = lum * mask.a;
+    
+    if (invertMask == 1) {
+        maskValue = 1.0 - maskValue;
     }
-  }
-
-  gl_FragColor = minColor;
-}
-`;
-
-// ----------------------------------------------------------------------
-// Find Edges — Sobel operator kernel
-// ----------------------------------------------------------------------
-export const findEdgesShader = `
-precision mediump float;
-uniform sampler2D tInput;
-uniform vec2 texelSize;  // 1.0 / vec2(width, height)
-uniform float strength;  // 0.5 – 3.0
-varying vec2 vUv;
-
-float luminance(vec3 c) {
-  return dot(c, vec3(0.299, 0.587, 0.114));
-}
-
-void main() {
-  // Sobel kernels
-  float tl = luminance(texture2D(tInput, vUv + vec2(-1, -1) * texelSize).rgb);
-  float tm = luminance(texture2D(tInput, vUv + vec2( 0, -1) * texelSize).rgb);
-  float tr = luminance(texture2D(tInput, vUv + vec2( 1, -1) * texelSize).rgb);
-  float ml = luminance(texture2D(tInput, vUv + vec2(-1,  0) * texelSize).rgb);
-  float mr = luminance(texture2D(tInput, vUv + vec2( 1,  0) * texelSize).rgb);
-  float bl = luminance(texture2D(tInput, vUv + vec2(-1,  1) * texelSize).rgb);
-  float bm = luminance(texture2D(tInput, vUv + vec2( 0,  1) * texelSize).rgb);
-  float br = luminance(texture2D(tInput, vUv + vec2( 1,  1) * texelSize).rgb);
-
-  // Sobel X and Y
-  float gx = -tl - 2.0*ml - bl + tr + 2.0*mr + br;
-  float gy = -tl - 2.0*tm - tr + bl + 2.0*bm + br;
-
-  float edge = sqrt(gx*gx + gy*gy) * strength;
-
-  gl_FragColor = vec4(vec3(edge), 1.0);
+    
+    gl_FragColor = vec4(comp.rgb, comp.a * maskValue);
 }
 `;
