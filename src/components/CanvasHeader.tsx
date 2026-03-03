@@ -1,8 +1,10 @@
 import { useEditorStore } from '@/store/editorStore';
-import { useState, useEffect } from 'react';
-import { ChevronDown } from 'lucide-react';
+import { useState } from 'react';
+import { ChevronDown, LayoutTemplate } from 'lucide-react';
 import { Button } from './ui/button';
+import { NumberInput } from './ui/number-input';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from './ui/dropdown-menu';
+import { TemplatesPanel } from './TemplatesPanel';
 
 const PRESETS = [
     { label: '1080p (1920x1080)', width: 1920, height: 1080 },
@@ -21,26 +23,12 @@ export const CanvasHeader = () => {
     const setCanvasSize = useEditorStore(s => s.setCanvasSize);
     const setCanvasBg = useEditorStore(s => s.setCanvasBg);
 
-    const [w, setW] = useState(canvasWidth.toString());
-    const [h, setH] = useState(canvasHeight.toString());
 
-    useEffect(() => {
-        setW(canvasWidth.toString());
-        setH(canvasHeight.toString());
-    }, [canvasWidth, canvasHeight]);
 
-    const handleApplySize = () => {
-        const nw = parseInt(w, 10);
-        const nh = parseInt(h, 10);
-        if (!isNaN(nw) && !isNaN(nh) && nw > 0 && nh > 0) {
-            setCanvasSize(nw, nh);
-        } else {
-            setW(canvasWidth.toString());
-            setH(canvasHeight.toString());
-        }
-    };
-
-    const hasImageLayer = layerOrder.some(id => layers[id]?.kind === 'image');
+    const hasImageLayer = layerOrder.some(id => {
+        const kind = layers[id]?.kind;
+        return kind === 'image' || kind === 'solid';
+    });
 
     const handleExport = () => {
         const canvas = document.getElementById('webgl-canvas') as HTMLCanvasElement | null;
@@ -55,37 +43,37 @@ export const CanvasHeader = () => {
         link.click();
     };
 
+    const [showTemplates, setShowTemplates] = useState(false);
+
     return (
         <header className="h-14 border-b border-border flex items-center justify-between px-6 bg-card shrink-0 uppercase tracking-widest text-xs font-bold w-full">
             <div className="flex items-center gap-4">
-                <span className="text-primary font-mono text-lg leading-none">VFX</span>
+                <span className="text-primary font-mono text-lg leading-none">AF /  Effects</span>
             </div>
 
             {/* Canvas Editor */}
-            <div className="flex items-center gap-6 font-mono text-muted-foreground mr-8">
+            <div className="flex items-center gap-4 font-mono text-muted-foreground mr-8">
                 <div className="flex items-center gap-1.5">
-                    <span className="text-[10px]">W:</span>
-                    <input
-                        type="number"
-                        value={w}
-                        onChange={e => setW(e.target.value)}
-                        onBlur={handleApplySize}
-                        onKeyDown={e => e.key === 'Enter' && handleApplySize()}
-                        className="w-24 bg-secondary/50 border border-border rounded px-2 py-1 text-foreground focus:outline-none focus:ring-1 focus:ring-primary text-center appearance-none tabular-nums"
+                    <NumberInput
+                        label="W"
+                        value={canvasWidth}
+                        onChange={(val) => { if (val > 0) setCanvasSize(val, canvasHeight); }}
+                        step={1}
+                        min={1}
+                        className="w-24"
                     />
-                    <span className="text-[10px] ml-2">H:</span>
-                    <input
-                        type="number"
-                        value={h}
-                        onChange={e => setH(e.target.value)}
-                        onBlur={handleApplySize}
-                        onKeyDown={e => e.key === 'Enter' && handleApplySize()}
-                        className="w-24 bg-secondary/50 border border-border rounded px-2 py-1 text-foreground focus:outline-none focus:ring-1 focus:ring-primary text-center appearance-none tabular-nums"
+                    <NumberInput
+                        label="H"
+                        value={canvasHeight}
+                        onChange={(val) => { if (val > 0) setCanvasSize(canvasWidth, val); }}
+                        step={1}
+                        min={1}
+                        className="w-24"
                     />
 
                     <DropdownMenu>
                         <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-7 w-7 ml-1 text-muted-foreground hover:text-foreground">
+                            <Button variant="ghost" size="icon" className="h-6 w-6 ml-1 text-muted-foreground hover:text-foreground">
                                 <ChevronDown size={14} />
                             </Button>
                         </DropdownMenuTrigger>
@@ -111,6 +99,7 @@ export const CanvasHeader = () => {
                         type="color"
                         value={canvasBgColor}
                         onChange={(e) => setCanvasBg(e.target.value, false)}
+                        aria-label="Canvas background color"
                         className={`w-6 h-6 p-0 border-0 rounded cursor-pointer [&::-webkit-color-swatch-wrapper]:p-0 [&::-webkit-color-swatch]:border-none [&::-webkit-color-swatch]:rounded ${canvasTransparent ? 'opacity-30' : 'opacity-100'}`}
                     />
                     <label className="flex items-center gap-1.5 cursor-pointer ml-1">
@@ -118,22 +107,33 @@ export const CanvasHeader = () => {
                             type="checkbox"
                             checked={canvasTransparent}
                             onChange={(e) => setCanvasBg(canvasBgColor, e.target.checked)}
+                            aria-label="Toggle transparent background"
                             className="w-3 h-3 accent-primary"
                         />
                         <span className="text-[10px] mt-0.5">Alpha</span>
                     </label>
                 </div>
+
             </div>
 
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3">
                 <button
+                    onClick={() => setShowTemplates(true)}
+                    className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground transition-colors px-3 py-1.5 border border-border hover:border-primary/50 uppercase font-bold tracking-wider text-xs"
+                >
+                    <LayoutTemplate size={14} />
+                    Templates
+                </button>
+                <Button
                     onClick={handleExport}
                     disabled={!hasImageLayer}
-                    className="bg-primary text-primary-foreground px-4 py-1.5 hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors uppercase font-bold tracking-wider rounded-sm text-xs"
+                    size="sm"
                 >
                     Export
-                </button>
+                </Button>
             </div>
+
+            <TemplatesPanel open={showTemplates} onClose={() => setShowTemplates(false)} />
         </header>
     );
 };

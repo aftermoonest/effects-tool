@@ -6,31 +6,14 @@ import * as Shaders from './shaders';
 import { effectRegistry } from './effectRegistry';
 import type { RenderContext } from './types';
 import './effects'; // Register all effect providers
-
-export const ASCII_FONT: Record<string, number> = {
-    "0": 15324974, "1": 4591758, "2": 15243551, "3": 31496254, "4": 2304994, "5": 33060926,
-    "6": 7633454, "7": 32540804, "8": 15252014, "9": 15252572, "A": 15269425, "B": 32045630,
-    "C": 16269839, "D": 32032318, "E": 33061407, "F": 33061392, "G": 16272943, "H": 18415153,
-    "I": 14815374, "J": 3180078, "K": 18444881, "L": 17318431, "M": 18732593, "N": 18667121,
-    "O": 15255086, "P": 32045584, "Q": 15259213, "R": 32045715, "S": 16267326, "T": 32641156,
-    "U": 18400814, "V": 18400580, "W": 18405233, "X": 18157905, "Y": 18157700, "Z": 32575775,
-    ".": 8, ":": 262400, "-": 14336, "=": 459200, "+": 145536, "*": 703136, "#": 11512810,
-    "%": 17895697, "@": 15261327, " ": 0, "a": 460273, "b": 17332798, "c": 508431, "d": 1097263,
-    "e": 491023, "f": 7633160, "g": 509409, "h": 17332785, "i": 4198532, "j": 1049646,
-    "k": 17320850, "l": 12718214, "m": 874033, "n": 1001009, "o": 476718, "p": 1001424,
-    "q": 509409, "r": 373000, "s": 475646, "t": 9314567, "u": 575023, "v": 574788, "w": 579434,
-    "x": 567633, "y": 574945, "z": 1022367, "_": 31, "/": 1118480, "\\": 17043521, "|": 4329604,
-    "(": 6562054, ")": 12650572, "[": 14950670, "]": 14747726, "{": 6578438, "}": 12651596,
-    "<": 2236546, ">": 8521864, "^": 4539392, "~": 349184, "`": 8519680, "\"": 10813440,
-    "'": 4325376, ",": 388, ";": 262404, "!": 4329476, "?": 15243268
-};
-
 export class Compositor {
     private regl: Regl;
     private canvas: HTMLCanvasElement;
 
     // Per-layer textures for image layers (keyed by layer ID)
     private layerTextures: Record<string, Texture2D> = {};
+    // Tracks the image object currently uploaded to each layer texture.
+    private layerTextureSources: Record<string, HTMLImageElement> = {};
 
     // Framebuffer Objects (FBOs) for ping-pong and compositing
     private fboA: Framebuffer2D;
@@ -38,6 +21,8 @@ export class Compositor {
     private fboC: Framebuffer2D;
     private fboD: Framebuffer2D; // New scratch FBO for effect rendering before blending
     private fboE: Framebuffer2D; // Mask rendering scratch FBO
+    private fboF: Framebuffer2D; // Baseline snapshot for mask-scoped rendering
+    private fboG: Framebuffer2D; // Mask-segment working composite
 
     // Blend mode string → shader int mapping
     private static BLEND_MODE_MAP: Record<string, number> = {
@@ -50,6 +35,10 @@ export class Compositor {
     private drawCommands: Record<string, ReturnType<Regl>> = {};
     // Dynamic draw commands loaded from the registry
     private dynamicDrawCommands: Record<string, ReturnType<Regl>> = {};
+    // Effect id -> array uniform names declared in shader (e.g., glyphs[32])
+    private dynamicArrayUniformNames: Record<string, Set<string>> = {};
+    // Lazily-created FBOs for nested group/mask scopes
+    private scopedFbos: Record<string, Framebuffer2D> = {};
 
     // For unmounting
     private unsubscribe: () => void;
@@ -67,6 +56,8 @@ export class Compositor {
         this.fboC = this.regl.framebuffer({ width: 1, height: 1, depth: false, stencil: false });
         this.fboD = this.regl.framebuffer({ width: 1, height: 1, depth: false, stencil: false });
         this.fboE = this.regl.framebuffer({ width: 1, height: 1, depth: false, stencil: false });
+        this.fboF = this.regl.framebuffer({ width: 1, height: 1, depth: false, stencil: false });
+        this.fboG = this.regl.framebuffer({ width: 1, height: 1, depth: false, stencil: false });
 
         this.initDrawCommands();
         this.initDynamicEffects(); // Compile registry effects
@@ -96,6 +87,11 @@ export class Compositor {
                         this.fboC.resize(curr.canvasWidth, curr.canvasHeight);
                         this.fboD.resize(curr.canvasWidth, curr.canvasHeight);
                         this.fboE.resize(curr.canvasWidth, curr.canvasHeight);
+                        this.fboF.resize(curr.canvasWidth, curr.canvasHeight);
+                        this.fboG.resize(curr.canvasWidth, curr.canvasHeight);
+                        Object.values(this.scopedFbos).forEach((fbo) => {
+                            fbo.resize(curr.canvasWidth, curr.canvasHeight);
+                        });
                     }
                 }
 
@@ -110,6 +106,16 @@ export class Compositor {
         this.unsubscribe();
         // Clean up layer textures
         Object.values(this.layerTextures).forEach(tex => tex.destroy());
+        this.layerTextureSources = {};
+        Object.values(this.scopedFbos).forEach(fbo => fbo.destroy());
+        for (const provider of effectRegistry.getAll()) {
+            if (!provider.destroy) continue;
+            try {
+                provider.destroy();
+            } catch (error) {
+                console.warn(`[Compositor] Effect cleanup failed: ${provider.id}`, error);
+            }
+        }
         this.regl.destroy();
     }
 
@@ -123,11 +129,27 @@ export class Compositor {
     private syncLayerTextures(layers: Record<string, Layer>) {
         // Add textures for new image layers
         for (const [id, layer] of Object.entries(layers)) {
-            if (layer.kind === 'image' && layer.sourceImage && !this.layerTextures[id]) {
-                if (layer.sourceImage.width > 0 && layer.sourceImage.height > 0) {
+            if (layer.kind !== 'image' || !layer.sourceImage) continue;
+            if (layer.sourceImage.width <= 0 || layer.sourceImage.height <= 0) continue;
+
+            if (!this.layerTextures[id]) {
+                this.layerTextures[id] = this.regl.texture({ data: layer.sourceImage });
+                this.layerTextureSources[id] = layer.sourceImage;
+                console.log(`[Compositor] Created texture for layer "${layer.name}" (${layer.sourceImage.width}x${layer.sourceImage.height})`);
+                continue;
+            }
+
+            if (this.layerTextureSources[id] !== layer.sourceImage) {
+                try {
+                    // Re-upload new bitmap to the existing GPU texture.
+                    this.layerTextures[id]({ data: layer.sourceImage });
+                } catch {
+                    // If dimensions/internal format changed in a way update cannot handle, recreate.
+                    this.layerTextures[id].destroy();
                     this.layerTextures[id] = this.regl.texture({ data: layer.sourceImage });
-                    console.log(`[Compositor] Created texture for layer "${layer.name}" (${layer.sourceImage.width}x${layer.sourceImage.height})`);
                 }
+                this.layerTextureSources[id] = layer.sourceImage;
+                console.log(`[Compositor] Updated texture for layer "${layer.name}" (${layer.sourceImage.width}x${layer.sourceImage.height})`);
             }
         }
 
@@ -136,6 +158,7 @@ export class Compositor {
             if (!layers[id]) {
                 this.layerTextures[id].destroy();
                 delete this.layerTextures[id];
+                delete this.layerTextureSources[id];
             }
         }
     }
@@ -163,6 +186,20 @@ export class Compositor {
                 uv: this.regl.prop<any, 'uv'>('uv'),
             },
             uniforms: { tInput: this.regl.prop<any, 'tInput'>('tInput') },
+            framebuffer: this.regl.prop<any, 'outFbo'>('outFbo'),
+            count: 6
+        });
+
+        // Fill a positioned rectangle with a constant color.
+        this.drawCommands['fill_rect_to_fbo'] = this.regl({
+            frag: Shaders.solidColorFragmentShader,
+            vert: Shaders.positionedColorVertexShader,
+            attributes: {
+                position: this.regl.prop<any, 'position'>('position'),
+            },
+            uniforms: {
+                fillColor: this.regl.prop<any, 'fillColor'>('fillColor'),
+            },
             framebuffer: this.regl.prop<any, 'outFbo'>('outFbo'),
             count: 6
         });
@@ -238,15 +275,17 @@ export class Compositor {
             count: 6
         });
 
-        // Apply mask: multiply composite alpha by mask alpha
+        // Apply mask: blend baseline and segment using mask value
         this.drawCommands['apply_mask'] = this.regl({
             frag: Shaders.applyMaskShader,
             vert: Shaders.baseVertexShader,
             attributes: { position: QUAD },
             uniforms: {
-                tInput: this.regl.prop<any, 'tInput'>('tInput'),
+                tBase: this.regl.prop<any, 'tBase'>('tBase'),
+                tSegment: this.regl.prop<any, 'tSegment'>('tSegment'),
                 tMask: this.regl.prop<any, 'tMask'>('tMask'),
                 invertMask: this.regl.prop<any, 'invertMask'>('invertMask'),
+                maskThreshold: this.regl.prop<any, 'maskThreshold'>('maskThreshold'),
             },
             framebuffer: this.regl.prop<any, 'outFbo'>('outFbo'),
             count: 6
@@ -275,6 +314,7 @@ export class Compositor {
 
             // Detect array uniforms in the shader source
             const arrayUniforms = Compositor.parseArrayUniforms(provider.fragmentShader);
+            this.dynamicArrayUniformNames[provider.id] = new Set(Object.keys(arrayUniforms));
 
             const uniformDefs: any = {
                 outFbo: this.regl.prop<any, 'outFbo'>('outFbo')
@@ -282,11 +322,15 @@ export class Compositor {
 
             for (const uniformName of Object.keys(provider.uniforms)) {
                 if (arrayUniforms[uniformName]) {
-                    // For array uniforms, register each element individually
+                    // Bind each array element explicitly from a single prop array.
+                    // Using regl.prop('name[0]') is interpreted as path access and can break.
                     const size = arrayUniforms[uniformName];
                     for (let i = 0; i < size; i++) {
                         const indexedName = `${uniformName}[${i}]`;
-                        uniformDefs[indexedName] = this.regl.prop<any, typeof indexedName>(indexedName as any);
+                        uniformDefs[indexedName] = (_: any, props: Record<string, unknown>) => {
+                            const raw = props[uniformName];
+                            return Array.isArray(raw) ? (raw[i] ?? 0) : 0;
+                        };
                     }
                 } else {
                     uniformDefs[uniformName] = this.regl.prop<any, typeof uniformName>(uniformName as any);
@@ -313,6 +357,33 @@ export class Compositor {
         })(() => {
             this.drawCommands['screen']({ tInput: texture });
         });
+    }
+
+    private getScopedFbo(key: string): Framebuffer2D {
+        const width = Math.max(this.canvas.width, 1);
+        const height = Math.max(this.canvas.height, 1);
+
+        let fbo = this.scopedFbos[key];
+        if (!fbo) {
+            fbo = this.regl.framebuffer({ width, height, depth: false, stencil: false });
+            this.scopedFbos[key] = fbo;
+        } else {
+            fbo.resize(width, height);
+        }
+
+        return fbo;
+    }
+
+    private getBlendScratchFbo(depth: number): Framebuffer2D {
+        return depth === 0 ? this.fboE : this.getScopedFbo(`blend_scratch_${depth}`);
+    }
+
+    private getMaskBaseFbo(depth: number): Framebuffer2D {
+        return depth === 0 ? this.fboF : this.getScopedFbo(`mask_base_${depth}`);
+    }
+
+    private getMaskSegmentFbo(depth: number): Framebuffer2D {
+        return depth === 0 ? this.fboG : this.getScopedFbo(`mask_segment_${depth}`);
     }
 
     // Apply an effect's shader using FBO ping-pong and return the new current input texture
@@ -343,24 +414,44 @@ export class Compositor {
         };
 
         const evaluatedUniforms: Record<string, any> = { outFbo: effectFbo };
+        const arrayUniformNames = this.dynamicArrayUniformNames[effect.type] ?? new Set<string>();
+        const normalizedParams = provider.coerceParams(effect.params);
 
         for (const [uniformName, evaluator] of Object.entries(provider.uniforms)) {
-            const value = evaluator(effect.params, context);
-            if (Array.isArray(value) && typeof value[0] === 'number' && value.length > 4) {
-                // Expand large arrays (like int[32]) into individual indexed entries
-                for (let i = 0; i < value.length; i++) {
-                    evaluatedUniforms[`${uniformName}[${i}]`] = value[i];
-                }
+            const value = evaluator(normalizedParams, context);
+            if (arrayUniformNames.has(uniformName) && Array.isArray(value)) {
+                evaluatedUniforms[uniformName] = value;
             } else {
                 evaluatedUniforms[uniformName] = value;
             }
         }
 
         console.log(`[Compositor] applyEffect: ${effect.type}`, Object.keys(evaluatedUniforms));
-        cmd(evaluatedUniforms);
+        try {
+            cmd(evaluatedUniforms);
+        } catch (error) {
+            console.error(`[Compositor] Effect draw failed: ${effect.type}`, error);
+            return { tex: currentInputTex as Framebuffer2D, read: readFbo, write: writeFbo };
+        }
 
-        // 2. Blend original (currentInputTex) with effect (effectFbo) into writeFbo
+        // 2. Blend original (currentInputTex) with effect (effectFbo) into writeFbo.
+        // ASCII and dither cutout modes bypass blend-over-original so the base image
+        // never bleeds under transparent output pixels.
         this.regl.clear({ color: [0, 0, 0, 0], framebuffer: writeFbo });
+        const isAsciiCutout = effect.type === 'ascii'
+            && (normalizedParams.background === false || normalizedParams.removeBgV2 === true);
+        const isDitherCutout = effect.type === 'dithering'
+            && normalizedParams.useColorMode !== true
+            && String(normalizedParams.colorMode ?? 'monochrome') === 'monochrome'
+            && (normalizedParams.removeBgV2 === true || normalizedParams.transparentBg === true);
+
+        if (isAsciiCutout || isDitherCutout) {
+            this.drawCommands['blit_fbo_to_fbo']({
+                tInput: effectFbo,
+                outFbo: writeFbo
+            });
+            return { tex: writeFbo, read: writeFbo, write: readFbo };
+        }
 
         const BLEND_MODES = Compositor.BLEND_MODE_MAP;
 
@@ -376,6 +467,309 @@ export class Compositor {
         return { tex: writeFbo, read: writeFbo, write: readFbo };
     }
 
+    private buildImageLayerTexture(
+        layer: Layer,
+        readFbo: Framebuffer2D,
+        writeFbo: Framebuffer2D,
+        effectFbo: Framebuffer2D
+    ): Framebuffer2D | null {
+        const tex = this.layerTextures[layer.id];
+        if (!tex) return null;
+
+        const cw = this.canvas.width;
+        const ch = this.canvas.height;
+        const x0 = (layer.x / cw) * 2 - 1;
+        const y0 = 1 - (layer.y / ch) * 2;
+        const x1 = ((layer.x + layer.width) / cw) * 2 - 1;
+        const y1 = 1 - ((layer.y + layer.height) / ch) * 2;
+
+        const quadVals = [
+            x0, y1, x1, y1, x0, y0,
+            x1, y0, x0, y0, x1, y1
+        ];
+        const uvVals = [
+            0, 0, 1, 0, 0, 1,
+            1, 1, 0, 1, 1, 0
+        ];
+
+        this.regl.clear({ color: [0, 0, 0, 0], framebuffer: writeFbo });
+        this.drawCommands['blit_to_fbo']({
+            tInput: tex,
+            outFbo: writeFbo,
+            position: quadVals,
+            uv: uvVals
+        });
+
+        let currentLayerTex: Framebuffer2D = writeFbo;
+        let layerReadFbo = writeFbo;
+        let layerWriteFbo = readFbo;
+
+        for (const effect of layer.effects) {
+            const result = this.applyEffect(effect, currentLayerTex, layerReadFbo, layerWriteFbo, effectFbo);
+            currentLayerTex = result.tex;
+            layerReadFbo = result.read;
+            layerWriteFbo = result.write;
+        }
+
+        return currentLayerTex;
+    }
+
+    private buildSolidLayerTexture(
+        layer: Layer,
+        readFbo: Framebuffer2D,
+        writeFbo: Framebuffer2D,
+        effectFbo: Framebuffer2D
+    ): Framebuffer2D {
+        const cw = this.canvas.width;
+        const ch = this.canvas.height;
+        const x0 = (layer.x / cw) * 2 - 1;
+        const y0 = 1 - (layer.y / ch) * 2;
+        const x1 = ((layer.x + layer.width) / cw) * 2 - 1;
+        const y1 = 1 - ((layer.y + layer.height) / ch) * 2;
+
+        const quadVals = [
+            x0, y1, x1, y1, x0, y0,
+            x1, y0, x0, y0, x1, y1
+        ];
+        const fillColor = this.parseHex(layer.solidColor ?? '#000000');
+
+        this.regl.clear({ color: [0, 0, 0, 0], framebuffer: writeFbo });
+        this.drawCommands['fill_rect_to_fbo']({
+            outFbo: writeFbo,
+            position: quadVals,
+            fillColor,
+        });
+
+        let currentLayerTex: Framebuffer2D = writeFbo;
+        let layerReadFbo = writeFbo;
+        let layerWriteFbo = readFbo;
+
+        for (const effect of layer.effects) {
+            const result = this.applyEffect(effect, currentLayerTex, layerReadFbo, layerWriteFbo, effectFbo);
+            currentLayerTex = result.tex;
+            layerReadFbo = result.read;
+            layerWriteFbo = result.write;
+        }
+
+        return currentLayerTex;
+    }
+
+    private renderLayerOntoTarget(
+        layer: Layer,
+        layers: Record<string, Layer>,
+        targetFbo: Framebuffer2D,
+        depth: number,
+        readFbo: Framebuffer2D,
+        writeFbo: Framebuffer2D,
+        effectFbo: Framebuffer2D
+    ) {
+        const scratchFbo = this.getBlendScratchFbo(depth);
+
+        if (layer.kind === 'image') {
+            if (layer.isMask) return;
+
+            const layerTex = this.buildImageLayerTexture(layer, readFbo, writeFbo, effectFbo);
+            if (!layerTex) return;
+
+            this.regl.clear({ color: [0, 0, 0, 0], framebuffer: scratchFbo });
+            this.drawCommands['blend_layer']({
+                tBase: targetFbo,
+                tLayer: layerTex,
+                opacity: layer.opacity,
+                blendMode: Compositor.BLEND_MODE_MAP[layer.blendMode] ?? 0,
+                outFbo: scratchFbo
+            });
+
+            this.regl.clear({ color: [0, 0, 0, 0], framebuffer: targetFbo });
+            this.drawCommands['blit_fbo_to_fbo']({ tInput: scratchFbo, outFbo: targetFbo });
+            return;
+        }
+
+        if (layer.kind === 'solid') {
+            const layerTex = this.buildSolidLayerTexture(layer, readFbo, writeFbo, effectFbo);
+
+            this.regl.clear({ color: [0, 0, 0, 0], framebuffer: scratchFbo });
+            this.drawCommands['blend_layer']({
+                tBase: targetFbo,
+                tLayer: layerTex,
+                opacity: layer.opacity,
+                blendMode: Compositor.BLEND_MODE_MAP[layer.blendMode] ?? 0,
+                outFbo: scratchFbo
+            });
+
+            this.regl.clear({ color: [0, 0, 0, 0], framebuffer: targetFbo });
+            this.drawCommands['blit_fbo_to_fbo']({ tInput: scratchFbo, outFbo: targetFbo });
+            return;
+        }
+
+        if (layer.kind === 'adjustment') {
+            let currentInput: Texture2D | Framebuffer2D = targetFbo;
+            let layerReadFbo = readFbo;
+            let layerWriteFbo = writeFbo;
+
+            for (const effect of layer.effects) {
+                if (!effect.visible) continue;
+                const result = this.applyEffect(effect, currentInput, layerReadFbo, layerWriteFbo, effectFbo);
+                currentInput = result.tex;
+                layerReadFbo = result.read;
+                layerWriteFbo = result.write;
+            }
+
+            if (currentInput !== targetFbo) {
+                this.regl.clear({ color: [0, 0, 0, 0], framebuffer: targetFbo });
+                this.drawCommands['blit_fbo_to_fbo']({ tInput: currentInput, outFbo: targetFbo });
+            }
+            return;
+        }
+
+        if (layer.kind === 'group') {
+            const visibleChildren = layer.children.filter((childId) => {
+                const child = layers[childId];
+                return !!child && child.visible;
+            });
+
+            if (visibleChildren.length === 0) return;
+
+            const groupContentFbo = this.getScopedFbo(`group_content_${depth + 1}`);
+
+            // Groups are isolated containers: render children first, then apply group-level effects.
+            this.regl.clear({ color: [0, 0, 0, 0], framebuffer: groupContentFbo });
+            this.renderLayerListOntoTarget(
+                visibleChildren,
+                layers,
+                groupContentFbo,
+                depth + 1,
+                readFbo,
+                writeFbo,
+                effectFbo
+            );
+
+            let currentGroupTex: Texture2D | Framebuffer2D = groupContentFbo;
+            let groupReadFbo = readFbo;
+            let groupWriteFbo = writeFbo;
+
+            for (const effect of layer.effects) {
+                if (!effect.visible) continue;
+                const result = this.applyEffect(effect, currentGroupTex, groupReadFbo, groupWriteFbo, effectFbo);
+                currentGroupTex = result.tex;
+                groupReadFbo = result.read;
+                groupWriteFbo = result.write;
+            }
+
+            this.regl.clear({ color: [0, 0, 0, 0], framebuffer: scratchFbo });
+            this.drawCommands['blend_layer']({
+                tBase: targetFbo,
+                tLayer: currentGroupTex,
+                opacity: layer.opacity,
+                blendMode: Compositor.BLEND_MODE_MAP[layer.blendMode] ?? 0,
+                outFbo: scratchFbo
+            });
+
+            this.regl.clear({ color: [0, 0, 0, 0], framebuffer: targetFbo });
+            this.drawCommands['blit_fbo_to_fbo']({ tInput: scratchFbo, outFbo: targetFbo });
+        }
+    }
+
+    private renderLayerListOntoTarget(
+        layerIds: string[],
+        layers: Record<string, Layer>,
+        targetFbo: Framebuffer2D,
+        depth: number,
+        readFbo: Framebuffer2D,
+        writeFbo: Framebuffer2D,
+        effectFbo: Framebuffer2D
+    ) {
+        type LayerSegment = { maskLayer: Layer | null; layers: Layer[] };
+
+        const visibleLayers: Layer[] = [];
+        for (const id of layerIds) {
+            const layer = layers[id];
+            if (!layer || !layer.visible) continue;
+            visibleLayers.push(layer);
+        }
+        if (visibleLayers.length === 0) return;
+
+        const segmentsTopToBottom: LayerSegment[] = [];
+        let currentSegment: LayerSegment = { maskLayer: null, layers: [] };
+
+        for (const layer of visibleLayers) {
+            if (layer.kind === 'image' && layer.isMask) {
+                if (currentSegment.maskLayer || currentSegment.layers.length > 0) {
+                    segmentsTopToBottom.push(currentSegment);
+                }
+                currentSegment = { maskLayer: layer, layers: [] };
+                continue;
+            }
+            currentSegment.layers.push(layer);
+        }
+        if (currentSegment.maskLayer || currentSegment.layers.length > 0) {
+            segmentsTopToBottom.push(currentSegment);
+        }
+
+        const scratchFbo = this.getBlendScratchFbo(depth);
+        const maskBaseFbo = this.getMaskBaseFbo(depth);
+        const segmentFbo = this.getMaskSegmentFbo(depth);
+
+        // Render segments bottom-to-top; each segment has its own mask scope.
+        for (let i = segmentsTopToBottom.length - 1; i >= 0; i--) {
+            const segment = segmentsTopToBottom[i];
+
+            if (!segment.maskLayer) {
+                for (let j = segment.layers.length - 1; j >= 0; j--) {
+                    this.renderLayerOntoTarget(
+                        segment.layers[j],
+                        layers,
+                        targetFbo,
+                        depth,
+                        readFbo,
+                        writeFbo,
+                        effectFbo
+                    );
+                }
+                continue;
+            }
+
+            // Snapshot baseline (content outside this mask segment)
+            this.regl.clear({ color: [0, 0, 0, 0], framebuffer: maskBaseFbo });
+            this.drawCommands['blit_fbo_to_fbo']({ tInput: targetFbo, outFbo: maskBaseFbo });
+
+            // Render segment in isolation from the same baseline
+            this.regl.clear({ color: [0, 0, 0, 0], framebuffer: segmentFbo });
+            this.drawCommands['blit_fbo_to_fbo']({ tInput: targetFbo, outFbo: segmentFbo });
+
+            for (let j = segment.layers.length - 1; j >= 0; j--) {
+                this.renderLayerOntoTarget(
+                    segment.layers[j],
+                    layers,
+                    segmentFbo,
+                    depth,
+                    readFbo,
+                    writeFbo,
+                    effectFbo
+                );
+            }
+
+            const maskTex = this.buildImageLayerTexture(segment.maskLayer, readFbo, writeFbo, effectFbo);
+
+            this.regl.clear({ color: [0, 0, 0, 0], framebuffer: scratchFbo });
+            if (maskTex) {
+                this.drawCommands['apply_mask']({
+                    tBase: maskBaseFbo,
+                    tSegment: segmentFbo,
+                    tMask: maskTex,
+                    invertMask: segment.maskLayer.invertMask ? 1 : 0,
+                    maskThreshold: segment.maskLayer.maskThreshold ?? 0.5,
+                    outFbo: scratchFbo
+                });
+            } else {
+                this.drawCommands['blit_fbo_to_fbo']({ tInput: segmentFbo, outFbo: scratchFbo });
+            }
+
+            this.regl.clear({ color: [0, 0, 0, 0], framebuffer: targetFbo });
+            this.drawCommands['blit_fbo_to_fbo']({ tInput: scratchFbo, outFbo: targetFbo });
+        }
+    }
+
     // ─── Main Render ────────────────────────────────────────────────────
 
     private render(layers: Record<string, Layer>, layerOrder: string[], bgColor: string, transparent: boolean) {
@@ -387,128 +781,13 @@ export class Compositor {
             return;
         }
 
-        // Flatten visible layers top-to-bottom visually
-        const getFlattenedLayers = (): Layer[] => {
-            const list: Layer[] = [];
-            const walk = (ids: string[]) => {
-                for (const id of ids) {
-                    const layer = layers[id];
-                    if (!layer || !layer.visible) continue;
-                    list.push(layer);
-                    if (layer.kind === 'group' && layer.children.length > 0) {
-                        walk(layer.children);
-                    }
-                }
-            };
-            walk(layerOrder);
-            return list;
-        };
-
-        const flatVisibleLayers = getFlattenedLayers();
-        // Walk layers bottom-to-top for rendering
-        const renderList = flatVisibleLayers.reverse();
-
-        // No visible layers → clear
-        if (renderList.length === 0) {
-            this.regl.clear({ color: clearColor, depth: 1 });
-            return;
-        }
-
-        let compFbo = this.fboA;
-        let layerReadFbo = this.fboB;
-        let layerWriteFbo = this.fboC;
-        let effectFbo = this.fboD;
-        const maskFbo = this.fboE;
+        const compFbo = this.fboA;
+        const layerReadFbo = this.fboB;
+        const layerWriteFbo = this.fboC;
+        const effectFbo = this.fboD;
 
         this.regl.clear({ color: clearColor, framebuffer: compFbo });
-
-        for (const layer of renderList) {
-            if (layer.kind === 'image') {
-                // Image layer: start from its texture
-                const tex = this.layerTextures[layer.id];
-                if (!tex) continue;
-
-                // Dynamic position based on layer dimensions vs canvas dimensions
-                const cw = this.canvas.width;
-                const ch = this.canvas.height;
-                const x0 = (layer.x / cw) * 2 - 1;
-                const y0 = 1 - (layer.y / ch) * 2;
-                const x1 = ((layer.x + layer.width) / cw) * 2 - 1;
-                const y1 = 1 - ((layer.y + layer.height) / ch) * 2;
-
-                const quadVals = [
-                    x0, y1, x1, y1, x0, y0,
-                    x1, y0, x0, y0, x1, y1
-                ];
-                const uvVals = [
-                    0, 0, 1, 0, 0, 1,
-                    1, 1, 0, 1, 1, 0
-                ];
-
-                this.regl.clear({ color: [0, 0, 0, 0], framebuffer: layerWriteFbo });
-                this.drawCommands['blit_to_fbo']({
-                    tInput: tex,
-                    outFbo: layerWriteFbo,
-                    position: quadVals,
-                    uv: uvVals
-                });
-
-                let currentLayerTex: Framebuffer2D = layerWriteFbo;
-
-                // Swap so layerReadFbo has the initial image for effects
-                let tmp = layerReadFbo;
-                layerReadFbo = layerWriteFbo;
-                layerWriteFbo = tmp;
-
-                // Apply effects chain on this image layer
-                for (const effect of layer.effects) {
-                    const result = this.applyEffect(effect, currentLayerTex, layerReadFbo, layerWriteFbo, effectFbo);
-                    currentLayerTex = result.tex;
-                    layerReadFbo = result.read;
-                    layerWriteFbo = result.write;
-                }
-
-                if (layer.isMask) {
-                    // Mask layer: use its alpha to clip the composite
-                    this.regl.clear({ color: [0, 0, 0, 0], framebuffer: maskFbo });
-                    this.drawCommands['apply_mask']({
-                        tInput: compFbo,
-                        tMask: currentLayerTex,
-                        invertMask: layer.invertMask ? 1 : 0,
-                        outFbo: maskFbo
-                    });
-                    // Copy result back into compFbo
-                    this.regl.clear({ color: [0, 0, 0, 0], framebuffer: compFbo });
-                    this.drawCommands['blit_fbo_to_fbo']({ tInput: maskFbo, outFbo: compFbo });
-                } else {
-                    // Normal image layer: blend onto composite with blend mode + opacity
-                    this.regl.clear({ color: [0, 0, 0, 0], framebuffer: maskFbo });
-                    this.drawCommands['blend_layer']({
-                        tBase: compFbo,
-                        tLayer: currentLayerTex,
-                        opacity: layer.opacity,
-                        blendMode: Compositor.BLEND_MODE_MAP[layer.blendMode] ?? 0,
-                        outFbo: maskFbo
-                    });
-                    // Copy result back into compFbo
-                    this.regl.clear({ color: [0, 0, 0, 0], framebuffer: compFbo });
-                    this.drawCommands['blit_fbo_to_fbo']({ tInput: maskFbo, outFbo: compFbo });
-                }
-
-            } else if (layer.kind === 'adjustment') {
-                // Adjustment layer: apply its effects to the current composite
-                for (const effect of layer.effects) {
-                    if (!effect.visible) continue;
-
-                    const result = this.applyEffect(effect, compFbo, layerReadFbo, layerWriteFbo, effectFbo);
-
-                    // The result is in result.tex (which was layerWriteFbo)
-                    // We need to swap compFbo to be this new texture.
-                    compFbo = result.tex;
-                    layerWriteFbo = result.read; // Give layerWriteFbo the old clean buffer
-                }
-            }
-        }
+        this.renderLayerListOntoTarget(layerOrder, layers, compFbo, 0, layerReadFbo, layerWriteFbo, effectFbo);
 
         // Final output to screen
         this.drawToScreen(compFbo, clearColor);

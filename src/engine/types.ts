@@ -1,4 +1,9 @@
 import type { Texture2D, Framebuffer2D, Regl } from 'regl';
+import type { EffectParams, EffectType } from '@/store/editorStore';
+
+// ----------------------------------------------------------------------
+// Effect Rendering Types
+// ----------------------------------------------------------------------
 
 export interface RenderContext {
     inputTex: Texture2D | Framebuffer2D;
@@ -7,21 +12,62 @@ export interface RenderContext {
     time: number;
 }
 
-export interface EffectProvider {
-    id: string; // Must map to effect.type from editorStore
+// ----------------------------------------------------------------------
+// Effect UI Schema Types
+// ----------------------------------------------------------------------
 
-    name: string; // Human readable name for the UI
+export type EffectParamValue = number | string | boolean | number[];
 
+export interface EffectOption {
+    value: string;
+    label: string;
+}
+
+export type EffectControlType =
+    | 'slider'
+    | 'select'
+    | 'checkbox'
+    | 'color'
+    | 'text'
+    | 'segmented'
+    | 'levels_editor'
+    | 'curves_editor';
+
+export interface EffectControlDef {
+    key: string;
+    label: string;
+    type: EffectControlType;
+    min?: number;
+    max?: number;
+    step?: number;
+    options?: EffectOption[];
+    unit?: string;
+    showWhen?: (params: EffectParams) => boolean;
+    helpText?: string;
+}
+
+// ----------------------------------------------------------------------
+// Unified Effect Plugin Interface
+// ----------------------------------------------------------------------
+
+export interface EffectPlugin {
+    // Identifier & Metadata
+    id: EffectType;
+    name: string;
+
+    // WebGL Rendering Logic
     fragmentShader: string;
-    vertexShader?: string; // Optional override, otherwise uses standard baseVertexShader
-
-    // Evaluators to map UI params -> WebGL uniforms
-    // The key is the exact uniform name used in the shader.
+    vertexShader?: string;
     uniforms: Record<string, (params: any, context: RenderContext) => any>;
-
-    // Optional setup hooks for complex effects that need own FBOs/textures
     init?: (regl: Regl) => void;
-
-    // Optional cleanup
     destroy?: () => void;
+
+    // UI Configuration
+    defaultParams: EffectParams;
+    controls: EffectControlDef[];
+    isExtension?: boolean;
+    helpText?: string;
+
+    // Param Migration & Validation
+    coerceParams: (params: EffectParams | undefined) => EffectParams;
 }

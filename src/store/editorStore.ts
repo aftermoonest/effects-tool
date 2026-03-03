@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
+import { DEFAULT_ASCII_IMPORT_FONT_ID, renderAsciiTextToImage } from '@/lib/importLayerFile';
 
 // ----------------------------------------------------------------------
 // Types & Interfaces
@@ -17,7 +18,9 @@ export type EffectType =
     | 'minimum'
     | 'find_edges'
     | 'ascii'
-    | 'dithering';
+    | 'dithering'
+    | 'stippling'
+    | 'cellular_automata';
 
 export type BlendMode =
     | 'normal'
@@ -31,7 +34,7 @@ export type BlendMode =
     | 'color_dodge'
     | 'color_burn';
 
-export type LayerKind = 'image' | 'adjustment' | 'group' | 'mask';
+export type LayerKind = 'image' | 'adjustment' | 'group' | 'mask' | 'solid';
 
 // Generic uniform bag — each effect populates its own keys
 export interface EffectParams {
@@ -70,6 +73,12 @@ export interface Layer {
     // Mask properties (image layers only)
     isMask?: boolean;       // when true, this image layer acts as an alpha mask
     invertMask?: boolean;   // when true, invert the mask alpha
+    maskThreshold?: number; // 0..1 threshold used for luminance-derived mask alpha
+    // Solid layer properties
+    solidColor?: string;    // hex color (solid layers only)
+    // Imported ASCII text source (if this image layer was created from a text file)
+    asciiTextSource?: string;
+    asciiTextFontId?: string;
 }
 
 export interface LayerTransformSnapshot {
@@ -96,6 +105,7 @@ export interface EditorState {
     canvasHeight: number;
     canvasBgColor: string;
     canvasTransparent: boolean;
+    asciiImportFontId: string;
 
     // Viewport zoom & pan
     zoom: number;
@@ -113,7 +123,12 @@ export interface EditorState {
 
 export interface EditorActions {
     // Layer CRUD
-    addImageLayer: (img: HTMLImageElement, name?: string) => void;
+    addImageLayer: (
+        img: HTMLImageElement,
+        name?: string,
+        options?: { asciiTextSource?: string; asciiTextFontId?: string }
+    ) => string;
+    addSolidLayer: (name?: string, color?: string) => void;
     addAdjustmentLayer: (name?: string) => void;
     addGroup: (name?: string) => void;
     addMaskLayer: (name?: string) => void;
@@ -124,9 +139,11 @@ export interface EditorActions {
     renameLayer: (id: string, name: string) => void;
     setLayerOpacity: (id: string, opacity: number) => void;
     setLayerBlendMode: (id: string, mode: BlendMode) => void;
+    setSolidLayerColor: (id: string, color: string) => void;
     toggleLayerCollapsed: (id: string) => void;
     toggleLayerMask: (id: string) => void;
     toggleLayerInvertMask: (id: string) => void;
+    setLayerMaskThreshold: (id: string, threshold: number) => void;
 
     // Layer ordering (DnD)
     moveLayerToPosition: (activeId: string, overId: string, intent: 'before' | 'after' | 'into') => void;
@@ -164,6 +181,10 @@ export interface EditorActions {
     // Canvas
     setCanvasSize: (width: number, height: number) => void;
     setCanvasBg: (color: string, transparent: boolean) => void;
+    setAsciiImportFontId: (fontId: string) => void;
+
+    // Templates
+    applyTemplate: (bgImg: HTMLImageElement, overlayImg: HTMLImageElement, name: string) => void;
 
     // Render
     triggerRender: () => void;
@@ -187,6 +208,7 @@ const nextLayerName = (kind: LayerKind, customName?: string): string => {
     layerCounter++;
     switch (kind) {
         case 'image': return `Image ${layerCounter}`;
+        case 'solid': return `Solid ${layerCounter}`;
         case 'adjustment': return `Adjustment ${layerCounter}`;
         case 'group': return `Group ${layerCounter}`;
         case 'mask': return `Mask ${layerCounter}`;
@@ -273,6 +295,7 @@ export const useEditorStore = create<EditorStore>()(
         canvasHeight: DEFAULT_CANVAS_HEIGHT,
         canvasBgColor: '#000000',
         canvasTransparent: true,
+        asciiImportFontId: DEFAULT_ASCII_IMPORT_FONT_ID,
         zoom: 1,
         panX: 0,
         panY: 0,
@@ -285,7 +308,7 @@ export const useEditorStore = create<EditorStore>()(
         // Layer CRUD
         // =====================================================================
 
-        addImageLayer: (img, name) => {
+        addImageLayer: (img, name, options) => {
             const id = generateId();
             const layer: Layer = {
                 id,
@@ -305,6 +328,10 @@ export const useEditorStore = create<EditorStore>()(
                 sourceImage: img,
                 imageWidth: img.width,
                 imageHeight: img.height,
+                asciiTextSource: options?.asciiTextSource,
+                asciiTextFontId: options?.asciiTextSource
+                    ? (options.asciiTextFontId ?? DEFAULT_ASCII_IMPORT_FONT_ID)
+                    : undefined,
             };
             set((state) => {
                 const newLayers = { ...state.layers, [id]: layer };
@@ -331,6 +358,38 @@ export const useEditorStore = create<EditorStore>()(
                     activeLayerId: id,
                     canvasWidth: targetW,
                     canvasHeight: targetH,
+                    renderTrigger: state.renderTrigger + 1,
+                };
+            });
+            return id;
+        },
+
+        addSolidLayer: (name, color = '#000000') => {
+            const id = generateId();
+            set((state) => {
+                const width = Math.max(state.canvasWidth, 1);
+                const height = Math.max(state.canvasHeight, 1);
+                const layer: Layer = {
+                    id,
+                    name: nextLayerName('solid', name),
+                    kind: 'solid',
+                    visible: true,
+                    opacity: 1,
+                    blendMode: 'normal',
+                    effects: [],
+                    children: [],
+                    parentId: null,
+                    collapsed: false,
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                    solidColor: color,
+                };
+                return {
+                    layers: { ...state.layers, [id]: layer },
+                    layerOrder: [id, ...state.layerOrder],
+                    activeLayerId: id,
                     renderTrigger: state.renderTrigger + 1,
                 };
             });
@@ -552,6 +611,17 @@ export const useEditorStore = create<EditorStore>()(
             };
         }),
 
+        setSolidLayerColor: (id, color) => set((state) => {
+            const layer = state.layers[id];
+            if (!layer || layer.kind !== 'solid') return state;
+            const nextColor = /^#[0-9a-fA-F]{6}$/.test(color) ? color : (layer.solidColor ?? '#000000');
+            if (nextColor === layer.solidColor) return state;
+            return {
+                layers: { ...state.layers, [id]: { ...layer, solidColor: nextColor } },
+                renderTrigger: state.renderTrigger + 1,
+            };
+        }),
+
         toggleLayerCollapsed: (id) => set((state) => {
             const layer = state.layers[id];
             if (!layer) return state;
@@ -565,7 +635,15 @@ export const useEditorStore = create<EditorStore>()(
             if (!layer || layer.kind !== 'image') return state;
             const newIsMask = !layer.isMask;
             return {
-                layers: { ...state.layers, [id]: { ...layer, isMask: newIsMask, invertMask: newIsMask ? layer.invertMask : false } },
+                layers: {
+                    ...state.layers,
+                    [id]: {
+                        ...layer,
+                        isMask: newIsMask,
+                        invertMask: newIsMask ? layer.invertMask : false,
+                        maskThreshold: newIsMask ? (layer.maskThreshold ?? 0.5) : layer.maskThreshold
+                    }
+                },
                 renderTrigger: state.renderTrigger + 1,
             };
         }),
@@ -575,6 +653,16 @@ export const useEditorStore = create<EditorStore>()(
             if (!layer || !layer.isMask) return state;
             return {
                 layers: { ...state.layers, [id]: { ...layer, invertMask: !layer.invertMask } },
+                renderTrigger: state.renderTrigger + 1,
+            };
+        }),
+
+        setLayerMaskThreshold: (id, threshold) => set((state) => {
+            const layer = state.layers[id];
+            if (!layer || !layer.isMask) return state;
+            const clamped = Math.min(Math.max(threshold, 0), 1);
+            return {
+                layers: { ...state.layers, [id]: { ...layer, maskThreshold: clamped } },
                 renderTrigger: state.renderTrigger + 1,
             };
         }),
@@ -973,6 +1061,128 @@ export const useEditorStore = create<EditorStore>()(
             canvasTransparent: transparent,
             renderTrigger: state.renderTrigger + 1
         })),
+
+        setAsciiImportFontId: (fontId) => {
+            set(() => ({ asciiImportFontId: fontId }));
+
+            const textLayers = Object.entries(get().layers)
+                .filter(([, layer]) => layer.kind === 'image' && typeof layer.asciiTextSource === 'string' && layer.asciiTextSource.length > 0)
+                .map(([id, layer]) => ({ id, text: layer.asciiTextSource as string }));
+
+            for (const { id, text } of textLayers) {
+                void renderAsciiTextToImage(text, { asciiFontId: fontId })
+                    .then((image) => {
+                        // Ignore stale async results from older font selections.
+                        if (get().asciiImportFontId !== fontId) return;
+
+                        set((state) => {
+                            const layer = state.layers[id];
+                            if (!layer || layer.kind !== 'image' || layer.asciiTextSource !== text) {
+                                return state;
+                            }
+
+                            return {
+                                layers: {
+                                    ...state.layers,
+                                    [id]: {
+                                        ...layer,
+                                        sourceImage: image,
+                                        imageWidth: image.width,
+                                        imageHeight: image.height,
+                                        asciiTextFontId: fontId,
+                                    },
+                                },
+                                renderTrigger: state.renderTrigger + 1,
+                            };
+                        });
+                    })
+                    .catch((error) => {
+                        console.error('[ASCII] Failed to re-render text layer with selected font:', error);
+                    });
+            }
+        },
+
+        // =====================================================================
+        // Templates
+        // =====================================================================
+
+        applyTemplate: (bgImg, overlayImg, name) => {
+            // Reset layer counter
+            layerCounter = 0;
+
+            const bgId = generateId();
+            const overlayId = generateId();
+            const W = 1920;
+            const H = 1080;
+
+            // Scale bg to cover canvas
+            const bgScaleX = W / bgImg.width;
+            const bgScaleY = H / bgImg.height;
+            const bgScale = Math.max(bgScaleX, bgScaleY);
+            const bgW = bgImg.width * bgScale;
+            const bgH = bgImg.height * bgScale;
+
+            // Scale overlay to fit canvas
+            const ovScaleX = W / overlayImg.width;
+            const ovScaleY = H / overlayImg.height;
+            const ovScale = Math.min(ovScaleX, ovScaleY);
+            const ovW = overlayImg.width * ovScale;
+            const ovH = overlayImg.height * ovScale;
+
+            const bgLayer: Layer = {
+                id: bgId,
+                name: `${name} — BG`,
+                kind: 'image',
+                visible: true,
+                opacity: 1,
+                blendMode: 'normal',
+                effects: [],
+                children: [],
+                parentId: null,
+                collapsed: false,
+                x: (W - bgW) / 2,
+                y: (H - bgH) / 2,
+                width: bgW,
+                height: bgH,
+                sourceImage: bgImg,
+                imageWidth: bgImg.width,
+                imageHeight: bgImg.height,
+            };
+
+            const overlayLayer: Layer = {
+                id: overlayId,
+                name: `${name} — Overlay`,
+                kind: 'image',
+                visible: true,
+                opacity: 1,
+                blendMode: 'screen',
+                effects: [],
+                children: [],
+                parentId: null,
+                collapsed: false,
+                x: (W - ovW) / 2,
+                y: (H - ovH) / 2,
+                width: ovW,
+                height: ovH,
+                sourceImage: overlayImg,
+                imageWidth: overlayImg.width,
+                imageHeight: overlayImg.height,
+            };
+
+            set({
+                layers: { [bgId]: bgLayer, [overlayId]: overlayLayer },
+                layerOrder: [overlayId, bgId],
+                activeLayerId: overlayId,
+                canvasWidth: W,
+                canvasHeight: H,
+                canvasBgColor: '#000000',
+                canvasTransparent: false,
+                transformUndoStack: [],
+                transformRedoStack: [],
+                transformSessionStart: null,
+                renderTrigger: Date.now(),
+            });
+        },
 
         // =====================================================================
         // Render trigger

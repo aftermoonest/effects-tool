@@ -1,10 +1,25 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
-import { PropertiesPanel } from './PropertiesPanel';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
-import { Slider } from '@/components/ui/slider';
-import { Settings2, Plus, Trash2, Eye, EyeOff, GripVertical, PanelRightClose, PanelRight, ChevronDown, ChevronRight, RotateCcw, Copy, Search } from 'lucide-react';
+import { SegmentedControl } from '@/components/ui/segmented-control';
+import { NumericSliderControl } from '@/components/ui/numeric-slider-control';
+import { PropertiesPanel } from './PropertiesPanel';
+import {
+    Settings2,
+    Plus,
+    Trash2,
+    Eye,
+    EyeOff,
+    GripVertical,
+    PanelRightClose,
+    PanelRight,
+    ChevronDown,
+    ChevronRight,
+    RotateCcw,
+    Copy,
+    Search
+} from 'lucide-react';
 import { useEditorStore } from '@/store/editorStore';
-import type { Effect, EffectType } from '@/store/editorStore';
+import type { Effect, EffectParams } from '@/store/editorStore';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -25,125 +40,269 @@ import {
     verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { effectRegistry } from '@/engine/effectRegistry';
+import type { EffectControlDef } from '@/engine/types';
+import { getLevelsKeysForChannel } from '@/engine/effects/levels';
+import { applyAsciiPreset } from '@/engine/effects/ascii';
+import { applyBlackWhitePreset } from '@/engine/effects/blackWhite';
+import { flattenCurvePoints, parseCurvePoints } from '@/engine/effects/toneUtils';
 
-// ─── Available Effects Catalog ──────────────────────────────────────────
+const BLEND_MODES = [
+    'normal',
+    'multiply',
+    'screen',
+    'overlay',
+    'soft_light',
+    'hard_light',
+    'difference',
+    'exclusion',
+    'color_dodge',
+    'color_burn',
+] as const;
 
-interface EffectDef {
-    id: EffectType;
-    label: string;
-    defaultParams: Record<string, number | string | boolean>;
-}
+const EFFECT_CATEGORIES: Record<string, string> = {
+    'brightness_contrast': 'Color Adjustments',
+    'black_white': 'Color Adjustments',
+    'levels': 'Color Adjustments',
+    'curves': 'Color Adjustments',
+    'selective_color': 'Color Adjustments',
 
-const AVAILABLE_EFFECTS: EffectDef[] = [
-    { id: 'brightness_contrast', label: 'Brightness & Contrast', defaultParams: { brightness: 0, contrast: 0 } },
-    { id: 'black_white', label: 'Black & White', defaultParams: {} },
-    { id: 'levels', label: 'Levels', defaultParams: { inBlack: 0, inWhite: 1, gamma: 1, outBlack: 0, outWhite: 1 } },
-    { id: 'curves', label: 'Curves', defaultParams: { shadows: 0, midtones: 0, highlights: 0 } },
-    { id: 'selective_color', label: 'Selective Color', defaultParams: { hueCenter: 0, hueRange: 0.15, satShift: 0, lumShift: 0 } },
-    { id: 'unsharp_mask', label: 'Unsharp Mask', defaultParams: { amount: 0.5, radius: 1 } },
-    { id: 'add_noise', label: 'Add Noise', defaultParams: { noiseAmount: 0.1 } },
-    { id: 'ripple', label: 'Ripple', defaultParams: { amplitude: 0.01, frequency: 10, phase: 0 } },
-    { id: 'minimum', label: 'Minimum (Erode)', defaultParams: { radius: 1 } },
-    { id: 'find_edges', label: 'Find Edges', defaultParams: { strength: 1 } },
-    { id: 'ascii', label: 'ASCII Art', defaultParams: { preset: 'Classic', characters: ' .:-=+*#%@', scale: 50, asciiGamma: 40, asciiPhase: 0, colorMode: 'Texture', background: false, bgColor: '#000000', textColor: '#ffffff', invertOrder: false } },
-    {
-        id: 'dithering', label: 'Dithering', defaultParams: {
-            pattern: 'F-S', colorMode: 'tritone', shadows: '#000000', midtones: '#ff4500', highlights: '#ffffff',
-            imagePreprocessing: false, preBlur: 0.5, preGrain: 0.1, preGamma: 1.0, preBlackPoint: 0, preWhitePoint: 255,
-            showEffect: true, pixelSize: 2, useColorMode: false, threshold: 128, transparentBg: false
-        }
-    },
-];
+    'ascii': 'Stylization & Generative Art',
+    'dithering': 'Stylization & Generative Art',
+    'stippling': 'Stylization & Generative Art',
+    'cellular_automata': 'Stylization & Generative Art',
 
-// Per-parameter slider configuration: [min, max, step]
-const PARAM_RANGES: Record<string, [number, number, number]> = {
-    brightness: [-1, 1, 0.01],
-    contrast: [-1, 1, 0.01],
-    inBlack: [0, 1, 0.01],
-    inWhite: [0, 1, 0.01],
-    gamma: [0.1, 4, 0.01],
-    outBlack: [0, 1, 0.01],
-    outWhite: [0, 1, 0.01],
-    shadows: [-1, 1, 0.01],
-    midtones: [-1, 1, 0.01],
-    highlights: [-1, 1, 0.01],
-    hueCenter: [0, 1, 0.01],
-    hueRange: [0, 0.5, 0.01],
-    satShift: [-1, 1, 0.01],
-    lumShift: [-1, 1, 0.01],
-    amount: [0, 3, 0.01],
-    amplitude: [0, 0.05, 0.001],
-    frequency: [1, 50, 0.5],
-    phase: [0, 6.28, 0.01],
-    radius: [0.5, 5, 0.1],
-    scale: [0, 100, 1],
-    asciiGamma: [0, 100, 1],
-    asciiPhase: [0, 100, 1],
-    preBlur: [0, 5, 0.1],
-    preGrain: [0, 1, 0.01],
-    preGamma: [0.1, 4, 0.01],
-    preBlackPoint: [0, 255, 1],
-    preWhitePoint: [0, 255, 1],
-    pixelSize: [1, 20, 1],
-    threshold: [0, 255, 1],
+    'unsharp_mask': 'Filters & Convolutions',
+    'find_edges': 'Filters & Convolutions',
+    'minimum': 'Filters & Convolutions',
+    'add_noise': 'Filters & Convolutions',
+    'ripple': 'Filters & Convolutions',
 };
 
-const ASCII_PRESETS: Record<string, string> = {
-    'Classic': ' .:-=+*#%@', 'Minimal': ' .+', 'Binary': ' 01', 'Matrix': ' 01',
-    'Hex': ' 0123456789ABCDEF', 'Grades': ' FDCBA', 'Math': ' +-*/=', 'Punctuation': ' .,:;!?',
-    'Brackets': ' ()[]{}', 'Angles': ' <>^v', 'Slashes': ' /\\|', 'Quotes': ' `\'"',
-    'Alpha': ' ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'Lower': ' abcdefghijklmnopqrstuvwxyz',
-    'Numeric': ' 0123456789', 'Vowels': ' aeiou', 'Consonants': ' bcdfghjklmnpqrstvwxyz',
-    'Lines': ' -_~', 'Dense': ' WMB80@#%', 'Sparse': ' .:,', 'Stars': ' +*#', 'Mixed': ' .o0O'
-};
+const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 
-const SliderParam = ({ label, paramKey, effect, layerId, val }: any) => {
-    const updateEffectParam = useEditorStore(s => s.updateEffectParam);
-    const [min, max, step] = PARAM_RANGES[paramKey] ?? [-1, 1, 0.01];
+
+
+const CurveEditor = ({
+    value,
+    onChange,
+}: {
+    value: number[];
+    onChange: (next: number[]) => void;
+}) => {
+    const size = 180;
+    const points = useMemo(() => parseCurvePoints(value), [value]);
+    const [selectedIdx, setSelectedIdx] = useState(0);
+    const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
+    const svgRef = useRef<SVGSVGElement>(null);
+    const safeSelectedIdx = clamp(selectedIdx, 0, points.length - 1);
+
+    const toSvg = (x: number, y: number) => ({
+        x: (x / 255) * size,
+        y: size - (y / 255) * size,
+    });
+
+    const fromEvent = (event: React.MouseEvent<SVGSVGElement, MouseEvent>) => {
+        const rect = svgRef.current?.getBoundingClientRect();
+        if (!rect) return { x: 0, y: 0 };
+
+        const localX = clamp(event.clientX - rect.left, 0, size);
+        const localY = clamp(event.clientY - rect.top, 0, size);
+
+        return {
+            x: clamp((localX / size) * 255, 0, 255),
+            y: clamp(((size - localY) / size) * 255, 0, 255),
+        };
+    };
+
+    const emit = (nextPoints: Array<{ x: number; y: number }>, nextSelected = safeSelectedIdx) => {
+        const sorted = [...nextPoints].sort((a, b) => a.x - b.x);
+        const finalPoints = sorted.map((point, index) => {
+            if (index === 0) return { x: 0, y: clamp(point.y, 0, 255) };
+            if (index === sorted.length - 1) return { x: 255, y: clamp(point.y, 0, 255) };
+            return { x: clamp(point.x, 0, 255), y: clamp(point.y, 0, 255) };
+        });
+        onChange(flattenCurvePoints(finalPoints));
+        setSelectedIdx(clamp(nextSelected, 0, finalPoints.length - 1));
+    };
+
+    const updatePoint = (index: number, x: number, y: number) => {
+        const next = points.map((point) => ({ ...point }));
+
+        const minX = index === 0 ? 0 : next[index - 1].x + 1;
+        const maxX = index === next.length - 1 ? 255 : next[index + 1].x - 1;
+
+        next[index].x = index === 0 ? 0 : index === next.length - 1 ? 255 : clamp(x, minX, maxX);
+        next[index].y = clamp(y, 0, 255);
+        emit(next, index);
+    };
+
+    const addPoint = (x: number, y: number) => {
+        const next = points.map((point) => ({ ...point }));
+        next.push({ x, y });
+        next.sort((a, b) => a.x - b.x);
+        const idx = next.findIndex((point) => Math.abs(point.x - x) < 0.5 && Math.abs(point.y - y) < 0.5);
+        emit(next, idx);
+    };
+
+    const removePoint = (index: number) => {
+        if (index <= 0 || index >= points.length - 1) return;
+        const next = points.filter((_, idx) => idx !== index);
+        emit(next, Math.max(0, index - 1));
+    };
+
+    const selected = points[safeSelectedIdx] ?? points[0];
+    const polyline = points.map((point) => {
+        const p = toSvg(point.x, point.y);
+        return `${p.x},${p.y}`;
+    }).join(' ');
+
     return (
         <div className="space-y-2 mt-2">
-            <div className="flex justify-between items-center text-[10px]">
-                <span className="text-muted-foreground font-mono uppercase truncate mr-2">{label}</span>
-                <input
-                    type="number"
-                    value={Number(val?.toFixed(3) ?? 0)}
-                    min={min}
-                    max={max}
-                    step={step}
-                    onChange={(e) => {
-                        const v = e.target.value === '' ? 0 : parseFloat(e.target.value);
-                        updateEffectParam(layerId, effect.id, paramKey, v);
-                    }}
-                    className="w-14 bg-secondary/50 border border-border rounded px-1.5 py-0.5 text-right font-mono text-primary tabular-nums focus:outline-none focus:ring-1 focus:ring-primary focus:bg-secondary transition-colors"
+            <svg
+                ref={svgRef}
+                width={size}
+                height={size}
+                viewBox={`0 0 ${size} ${size}`}
+                className="w-full max-w-[220px] border border-border rounded bg-secondary/20 cursor-crosshair"
+                onMouseMove={(event) => {
+                    if (draggingIdx === null) return;
+                    const pos = fromEvent(event);
+                    updatePoint(draggingIdx, pos.x, pos.y);
+                }}
+                onMouseUp={() => setDraggingIdx(null)}
+                onMouseLeave={() => setDraggingIdx(null)}
+                onDoubleClick={(event) => {
+                    const pos = fromEvent(event);
+                    addPoint(pos.x, pos.y);
+                }}
+            >
+                {[0.25, 0.5, 0.75].map((t) => (
+                    <g key={t}>
+                        <line x1={t * size} y1={0} x2={t * size} y2={size} stroke="rgba(255,255,255,0.12)" strokeWidth="1" />
+                        <line x1={0} y1={t * size} x2={size} y2={t * size} stroke="rgba(255,255,255,0.12)" strokeWidth="1" />
+                    </g>
+                ))}
+                <line x1={0} y1={size} x2={size} y2={0} stroke="rgba(255,255,255,0.2)" strokeWidth="1" />
+                <polyline points={polyline} fill="none" stroke="rgb(96,165,250)" strokeWidth="2" />
+                {points.map((point, index) => {
+                    const p = toSvg(point.x, point.y);
+                    const selectedPoint = index === safeSelectedIdx;
+                    return (
+                        <circle
+                            key={`${point.x}-${point.y}-${index}`}
+                            cx={p.x}
+                            cy={p.y}
+                            r={selectedPoint ? 4 : 3}
+                            fill={selectedPoint ? 'rgb(191,219,254)' : 'rgb(147,197,253)'}
+                            stroke="rgb(30,64,175)"
+                            strokeWidth="1"
+                            onMouseDown={(event) => {
+                                event.stopPropagation();
+                                setSelectedIdx(index);
+                                setDraggingIdx(index);
+                            }}
+                            onDoubleClick={(event) => {
+                                event.stopPropagation();
+                                removePoint(index);
+                            }}
+                        />
+                    );
+                })}
+            </svg>
+
+            <div className="grid grid-cols-2 gap-2">
+                <NumericSliderControl
+                    label="Point Input"
+                    value={selected.x}
+                    min={0}
+                    max={255}
+                    step={1}
+                    onChange={(next) => updatePoint(safeSelectedIdx, next, selected.y)}
+                />
+                <NumericSliderControl
+                    label="Point Output"
+                    value={selected.y}
+                    min={0}
+                    max={255}
+                    step={1}
+                    onChange={(next) => updatePoint(safeSelectedIdx, selected.x, next)}
                 />
             </div>
-            <Slider
-                value={[val ?? 0]}
-                min={min}
-                max={max}
-                step={step}
-                onValueChange={(v) => updateEffectParam(layerId, effect.id, paramKey, v[0])}
+            <p className="text-[10px] text-muted-foreground">Double-click graph to add point. Double-click point to remove.</p>
+        </div>
+    );
+};
+
+const LevelsEditor = ({
+    params,
+    onChange,
+}: {
+    params: EffectParams;
+    onChange: (key: string, value: number) => void;
+}) => {
+    const channel = String(params.selectedChannel ?? 'RGB');
+    const keys = getLevelsKeysForChannel(channel);
+
+    return (
+        <div className="space-y-2 mt-2">
+            <NumericSliderControl
+                label="Input Black"
+                value={Number(params[keys.inBlack])}
+                min={0}
+                max={255}
+                step={1}
+                onChange={(value) => onChange(keys.inBlack, value)}
+            />
+            <NumericSliderControl
+                label="Input White"
+                value={Number(params[keys.inWhite])}
+                min={0}
+                max={255}
+                step={1}
+                onChange={(value) => onChange(keys.inWhite, value)}
+            />
+            <NumericSliderControl
+                label="Input Gamma"
+                value={Number(params[keys.gamma])}
+                min={0.1}
+                max={9.99}
+                step={0.01}
+                onChange={(value) => onChange(keys.gamma, value)}
+            />
+            <NumericSliderControl
+                label="Output Black"
+                value={Number(params[keys.outBlack])}
+                min={0}
+                max={255}
+                step={1}
+                onChange={(value) => onChange(keys.outBlack, value)}
+            />
+            <NumericSliderControl
+                label="Output White"
+                value={Number(params[keys.outWhite])}
+                min={0}
+                max={255}
+                step={1}
+                onChange={(value) => onChange(keys.outWhite, value)}
             />
         </div>
     );
 };
 
-// ─── Sortable Effect Card ───────────────────────────────────────────────
-
 interface SortableEffectCardProps {
     effect: Effect;
     layerId: string;
-    index: number;
 }
 
 const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
     const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: effect.id });
-    const toggleEffectVisibility = useEditorStore(s => s.toggleEffectVisibility);
-    const removeEffect = useEditorStore(s => s.removeEffect);
-    const duplicateEffect = useEditorStore(s => s.duplicateEffect);
-    const updateEffectParam = useEditorStore(s => s.updateEffectParam);
-    const setEffectBlendMode = useEditorStore(s => s.setEffectBlendMode);
-    const setEffectOpacity = useEditorStore(s => s.setEffectOpacity);
+    const toggleEffectVisibility = useEditorStore((s) => s.toggleEffectVisibility);
+    const removeEffect = useEditorStore((s) => s.removeEffect);
+    const duplicateEffect = useEditorStore((s) => s.duplicateEffect);
+    const updateEffectParam = useEditorStore((s) => s.updateEffectParam);
+    const setEffectBlendMode = useEditorStore((s) => s.setEffectBlendMode);
+    const setEffectOpacity = useEditorStore((s) => s.setEffectOpacity);
     const [isExpanded, setIsExpanded] = useState(true);
 
     const style = {
@@ -151,7 +310,148 @@ const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
         transition,
     };
 
-    const effectLabel = AVAILABLE_EFFECTS.find(e => e.id === effect.type)?.label ?? effect.type;
+    const spec = effectRegistry.get(effect.type);
+    const params = useMemo(() => spec ? spec.coerceParams(effect.params) : effect.params, [spec, effect.params]);
+
+    if (!spec) return null;
+
+    const applyPatch = (patch: Record<string, string | number | boolean | number[]>) => {
+        for (const [key, value] of Object.entries(patch)) {
+            updateEffectParam(layerId, effect.id, key, value);
+        }
+    };
+
+    const setParam = (key: string, value: string | number | boolean | number[]) => {
+        if (effect.type === 'black_white' && key === 'preset' && typeof value === 'string') {
+            applyPatch(applyBlackWhitePreset(value, { ...params, preset: value }));
+            return;
+        }
+        if (effect.type === 'ascii' && key === 'preset' && typeof value === 'string') {
+            applyPatch(applyAsciiPreset(value, { ...params, preset: value }));
+            return;
+        }
+        updateEffectParam(layerId, effect.id, key, value);
+    };
+
+    const renderControl = (control: EffectControlDef) => {
+        if (control.showWhen && !control.showWhen(params)) return null;
+
+        const value = params[control.key] as string | number | boolean | number[] | undefined;
+
+        if (control.type === 'slider') {
+            if (typeof value !== 'number') return null;
+            return (
+                <NumericSliderControl
+                    key={control.key}
+                    label={control.label}
+                    value={value}
+                    min={control.min ?? 0}
+                    max={control.max ?? 1}
+                    step={control.step ?? 0.01}
+                    unit={control.unit}
+                    onChange={(next) => setParam(control.key, next)}
+                />
+            );
+        }
+
+        if (control.type === 'checkbox') {
+            return (
+                <div key={control.key} className="flex justify-between items-center text-[10px] mt-2">
+                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">{control.label}</span>
+                    <input
+                        type="checkbox"
+                        checked={Boolean(value)}
+                        onChange={(event) => setParam(control.key, event.target.checked)}
+                        className="h-3 w-3 rounded border-border bg-secondary text-primary accent-primary"
+                    />
+                </div>
+            );
+        }
+
+        if (control.type === 'text') {
+            return (
+                <div key={control.key} className="space-y-1 mt-2">
+                    <div className="flex justify-between items-center text-[10px]">
+                        <span className="text-muted-foreground font-mono uppercase truncate mr-2">{control.label}</span>
+                    </div>
+                    <input
+                        type="text"
+                        value={String(value ?? '')}
+                        onChange={(event) => setParam(control.key, event.target.value)}
+                        className="w-full bg-secondary/50 border border-border rounded px-2 py-1 font-mono text-primary text-[10px] focus:outline-none focus:ring-1 focus:ring-primary focus:bg-secondary transition-colors"
+                    />
+                </div>
+            );
+        }
+
+        if (control.type === 'color') {
+            return (
+                <div key={control.key} className="flex justify-between items-center text-[10px] mt-2">
+                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">{control.label}</span>
+                    <input
+                        type="color"
+                        value={typeof value === 'string' ? value : '#000000'}
+                        onChange={(event) => setParam(control.key, event.target.value)}
+                        className="h-5 w-8 p-0 border-0 rounded cursor-pointer bg-transparent"
+                    />
+                </div>
+            );
+        }
+
+        if (control.type === 'select') {
+            return (
+                <div key={control.key} className="flex justify-between items-center text-[10px] mt-2">
+                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">{control.label}</span>
+                    <select
+                        value={String(value ?? '')}
+                        onChange={(event) => setParam(control.key, event.target.value)}
+                        className="bg-secondary/50 border border-border rounded px-2 py-1 text-right font-mono text-primary focus:outline-none focus:ring-1 focus:ring-primary h-6 max-w-[140px]"
+                    >
+                        {(control.options ?? []).map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                    </select>
+                </div>
+            );
+        }
+
+        if (control.type === 'segmented') {
+            return (
+                <div key={control.key} className="space-y-1 mt-2">
+                    <span className="text-muted-foreground font-mono uppercase text-[10px]">{control.label}</span>
+                    <SegmentedControl
+                        value={String(value ?? '')}
+                        options={control.options ?? []}
+                        onChange={(next) => setParam(control.key, next)}
+                    />
+                </div>
+            );
+        }
+
+        if (control.type === 'levels_editor') {
+            return (
+                <div key={control.key}>
+                    <LevelsEditor
+                        params={params}
+                        onChange={(key, nextValue) => setParam(key, nextValue)}
+                    />
+                </div>
+            );
+        }
+
+        if (control.type === 'curves_editor') {
+            const channel = String(params.selectedChannel ?? 'RGB');
+            const key = channel === 'R' ? 'pointsR' : channel === 'G' ? 'pointsG' : channel === 'B' ? 'pointsB' : 'pointsRGB';
+            const curveValues = Array.isArray(params[key]) ? (params[key] as number[]) : [0, 0, 255, 255];
+            return (
+                <div key={control.key}>
+                    <CurveEditor value={curveValues} onChange={(next) => setParam(key, next)} />
+                </div>
+            );
+        }
+
+        return null;
+    };
 
     return (
         <div
@@ -164,71 +464,63 @@ const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
                 ${isDragging ? 'opacity-30 z-50 shadow-xl' : ''}
             `}
         >
-            {/* Effect header */}
             <div
-                className={`
-                    flex items-center gap-2 py-3 pr-2 pl-3 cursor-pointer
-                    hover:bg-secondary/30 border-l-2 border-l-transparent
-                `}
+                className="flex items-center gap-2 py-3 pr-2 pl-3 cursor-pointer hover:bg-secondary/30 border-l-2 border-l-transparent"
                 onClick={() => setIsExpanded(!isExpanded)}
             >
-                {/* Drag handle */}
                 <button
-                    className="shrink-0 p-0.5 text-muted-foreground/40 hover:text-muted-foreground cursor-grab active:cursor-grabbing"
+                    className="shrink-0 p-1 text-muted-foreground/40 hover:text-muted-foreground cursor-grab active:cursor-grabbing"
                     {...attributes}
                     {...listeners}
-                    onClick={(e) => e.stopPropagation()}
+                    onClick={(event) => event.stopPropagation()}
+                    aria-label="Drag to reorder"
                 >
                     <GripVertical size={14} />
                 </button>
 
-                {/* Collapse toggle */}
                 <button
-                    className="text-muted-foreground hover:text-foreground shrink-0 z-10 relative p-0.5"
-                    onClick={(e) => { e.stopPropagation(); setIsExpanded(!isExpanded); }}
+                    className="text-muted-foreground hover:text-foreground shrink-0 z-10 relative p-1"
+                    onClick={(event) => { event.stopPropagation(); setIsExpanded(!isExpanded); }}
+                    aria-label={isExpanded ? 'Collapse effect' : 'Expand effect'}
                 >
                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                 </button>
 
-                {/* Effect Icon */}
                 <Settings2 size={14} className="text-muted-foreground shrink-0" />
 
-                {/* Name */}
-                <span className="flex-1 truncate font-bold text-xs pointer-events-none">
-                    {effectLabel}
-                </span>
+                <div className="flex-1 min-w-0">
+                    <span className="block truncate font-bold text-xs pointer-events-none">{spec.name}</span>
+                </div>
 
-                {/* Visibility */}
                 <button
-                    className="text-muted-foreground hover:text-foreground shrink-0 z-10 relative p-0.5"
-                    onClick={(e) => { e.stopPropagation(); toggleEffectVisibility(layerId, effect.id); }}
+                    className="text-muted-foreground hover:text-foreground shrink-0 z-10 relative p-1"
+                    onClick={(event) => { event.stopPropagation(); toggleEffectVisibility(layerId, effect.id); }}
+                    aria-label={effect.visible ? 'Hide effect' : 'Show effect'}
                 >
                     {effect.visible ? <Eye size={14} /> : <EyeOff size={14} />}
                 </button>
 
-                {/* Duplicate */}
                 <button
-                    className="text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0 z-10 relative p-0.5"
-                    onClick={(e) => { e.stopPropagation(); duplicateEffect(layerId, effect.id); }}
+                    className="text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity shrink-0 z-10 relative p-1"
+                    onClick={(event) => { event.stopPropagation(); duplicateEffect(layerId, effect.id); }}
                     title="Duplicate effect"
+                    aria-label="Duplicate effect"
                 >
                     <Copy size={14} />
                 </button>
 
-                {/* Delete */}
                 <button
-                    className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity shrink-0 z-10 relative p-0.5"
-                    onClick={(e) => { e.stopPropagation(); removeEffect(layerId, effect.id); }}
+                    className="text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity shrink-0 z-10 relative p-1"
+                    onClick={(event) => { event.stopPropagation(); removeEffect(layerId, effect.id); }}
+                    aria-label="Remove effect"
                 >
                     <Trash2 size={14} />
                 </button>
             </div>
 
-            {/* Parameter sliders and controls */}
             {effect.visible && isExpanded && (
                 <div className="space-y-4 px-4 pb-4 pt-4 bg-secondary/10 border-t border-border/10">
-                    {/* Controls Row */}
-                    <div className="flex justify-between items-center pb-2 border-b border-border/10">
+                    <div className="flex justify-between items-center pb-2 border-b border-border/10 gap-2">
                         <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                                 <Button variant="outline" size="sm" className="h-6 text-[10px] px-2 font-mono uppercase tracking-wider">
@@ -236,10 +528,10 @@ const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
                                 </Button>
                             </DropdownMenuTrigger>
                             <DropdownMenuContent className="text-xs font-mono uppercase tracking-widest min-w-[120px]">
-                                {['normal', 'multiply', 'screen', 'overlay', 'soft_light', 'hard_light', 'difference', 'exclusion', 'color_dodge', 'color_burn'].map(mode => (
+                                {BLEND_MODES.map((mode) => (
                                     <DropdownMenuItem
                                         key={mode}
-                                        onClick={() => setEffectBlendMode(layerId, effect.id, mode as any)}
+                                        onClick={() => setEffectBlendMode(layerId, effect.id, mode)}
                                         className="cursor-pointer hover:bg-primary hover:text-primary-foreground text-[10px]"
                                     >
                                         {mode}
@@ -250,293 +542,38 @@ const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
 
                         <button
                             className="flex items-center text-[10px] uppercase font-bold tracking-widest text-muted-foreground hover:text-foreground transition-colors"
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                const defs = AVAILABLE_EFFECTS.find(e => e.id === effect.type)?.defaultParams;
-                                if (defs) {
-                                    Object.entries(defs).forEach(([k, v]) => {
-                                        updateEffectParam(layerId, effect.id, k, v);
-                                    });
-                                }
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                applyPatch(spec.defaultParams);
                             }}
                         >
                             <RotateCcw size={12} className="mr-1.5" /> Reset
                         </button>
                     </div>
 
-                    <div className="space-y-2">
-                        <div className="flex justify-between items-center text-[10px]">
-                            <span className="text-muted-foreground font-mono uppercase truncate mr-2">opacity</span>
-                            <input
-                                type="number"
-                                value={Number((effect.opacity ?? 1).toFixed(3))}
-                                min={0}
-                                max={1}
-                                step={0.01}
-                                onChange={(e) => {
-                                    const val = e.target.value === '' ? 0 : parseFloat(e.target.value);
-                                    setEffectOpacity(layerId, effect.id, val);
-                                }}
-                                className="w-14 bg-secondary/50 border border-border rounded px-1.5 py-0.5 text-right font-mono text-primary tabular-nums focus:outline-none focus:ring-1 focus:ring-primary focus:bg-secondary transition-colors"
-                            />
-                        </div>
-                        <Slider
-                            value={[effect.opacity ?? 1]}
-                            min={0}
-                            max={1}
-                            step={0.01}
-                            onValueChange={(val) => setEffectOpacity(layerId, effect.id, val[0])}
-                        />
-                    </div>
+                    {spec.helpText && <p className="text-[10px] text-muted-foreground">{spec.helpText}</p>}
 
-                    {/* Generic param rendering */}
-                    {effect.type !== 'dithering' && Object.entries(effect.params).map(([key, value]) => {
-                        // Custom Controls for Dithering/ASCII (strings/booleans)
-                        if (typeof value === 'boolean') {
-                            return (
-                                <div key={key} className="flex justify-between items-center text-[10px] mt-2">
-                                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
-                                    <input
-                                        type="checkbox"
-                                        checked={value}
-                                        onChange={(e) => updateEffectParam(layerId, effect.id, key, e.target.checked)}
-                                        className="h-3 w-3 rounded border-border bg-secondary text-primary accent-primary"
-                                    />
-                                </div>
-                            );
-                        }
+                    <NumericSliderControl
+                        label="Opacity"
+                        value={Number((effect.opacity ?? 1).toFixed(3))}
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        onChange={(value) => setEffectOpacity(layerId, effect.id, value)}
+                    />
 
-                        if (typeof value === 'string') {
-                            if (key === 'characters') {
-                                return (
-                                    <div key={key} className="space-y-1 mt-2">
-                                        <div className="flex justify-between items-center text-[10px]">
-                                            <span className="text-muted-foreground font-mono uppercase truncate mr-2">{key}</span>
-                                        </div>
-                                        <input
-                                            type="text"
-                                            value={value}
-                                            onChange={(e) => updateEffectParam(layerId, effect.id, key, e.target.value)}
-                                            className="w-full bg-secondary/50 border border-border rounded px-2 py-1 font-mono text-primary text-[10px] focus:outline-none focus:ring-1 focus:ring-primary focus:bg-secondary transition-colors"
-                                        />
-                                    </div>
-                                );
-                            }
-
-                            if (key === 'preset' || key === 'colorMode' || key === 'algorithm') {
-                                let options: string[] = [];
-                                if (key === 'preset') options = Object.keys(ASCII_PRESETS);
-                                if (key === 'colorMode' && effect.type === 'ascii') options = ['Texture', 'Grayscale', 'Monochrome'];
-                                if (key === 'colorMode' && effect.type === 'dithering') options = ['monochrome', 'duotone', 'tritone'];
-                                if (key === 'algorithm') options = ['atkinson', 'bayer', 'floyd_steinberg'];
-
-                                return (
-                                    <div key={key} className="flex justify-between items-center text-[10px] mt-2">
-                                        <span className="text-muted-foreground font-mono uppercase truncate mr-2">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
-                                        <select
-                                            value={value}
-                                            onChange={(e) => {
-                                                const val = e.target.value;
-                                                updateEffectParam(layerId, effect.id, key, val);
-                                                if (key === 'preset' && ASCII_PRESETS[val]) {
-                                                    updateEffectParam(layerId, effect.id, 'characters', ASCII_PRESETS[val]);
-                                                }
-                                            }}
-                                            className="bg-secondary/50 border border-border rounded px-1.5 py-0.5 text-right font-mono text-primary focus:outline-none focus:ring-1 focus:ring-primary h-6 max-w-[120px]"
-                                        >
-                                            {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                                        </select>
-                                    </div>
-                                );
-                            }
-
-                            if (key === 'shadows' || key === 'midtones' || key === 'highlights' || key === 'bgColor' || key === 'textColor') {
-                                if (effect.params.colorMode === 'monochrome' && (key === 'midtones' || key === 'highlights')) return null;
-                                if (effect.params.colorMode === 'duotone' && key === 'midtones') return null;
-                                if (effect.type === 'ascii' && key === 'bgColor' && !effect.params.background) return null;
-                                if (effect.type === 'ascii' && key === 'textColor' && effect.params.colorMode !== 'Monochrome') return null;
-
-                                return (
-                                    <div key={key} className="flex justify-between items-center text-[10px] mt-2">
-                                        <span className="text-muted-foreground font-mono uppercase truncate mr-2">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
-                                        <input
-                                            type="color"
-                                            value={value}
-                                            onChange={(e) => updateEffectParam(layerId, effect.id, key, e.target.value)}
-                                            className="h-5 w-8 p-0 border-0 rounded cursor-pointer bg-transparent"
-                                        />
-                                    </div>
-                                );
-                            }
-                            return null;
-                        }
-
-                        if (typeof value !== 'number') return null;
-                        const [min, max, step] = PARAM_RANGES[key] ?? [-1, 1, 0.01];
-                        return (
-                            <div key={key} className="space-y-2 mt-2">
-                                <div className="flex justify-between items-center text-[10px]">
-                                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">{key.replace(/([A-Z])/g, ' $1').trim()}</span>
-                                    <input
-                                        type="number"
-                                        value={Number(value.toFixed(3))}
-                                        min={min}
-                                        max={max}
-                                        step={step}
-                                        onChange={(e) => {
-                                            const val = e.target.value === '' ? 0 : parseFloat(e.target.value);
-                                            updateEffectParam(layerId, effect.id, key, val);
-                                        }}
-                                        className="w-14 bg-secondary/50 border border-border rounded px-1.5 py-0.5 text-right font-mono text-primary tabular-nums focus:outline-none focus:ring-1 focus:ring-primary focus:bg-secondary transition-colors"
-                                    />
-                                </div>
-                                <Slider
-                                    value={[value]}
-                                    min={min}
-                                    max={max}
-                                    step={step}
-                                    onValueChange={(val) => updateEffectParam(layerId, effect.id, key, val[0])}
-                                />
-                            </div>
-                        );
-                    })}
-
-                    {/* Custom Dithering UI */}
-                    {effect.type === 'dithering' && (
-                        <div className="space-y-4 mt-4">
-                            {/* Bypass Toggle */}
-                            <div className="flex justify-between items-center text-[10px]">
-                                <span className="text-muted-foreground font-mono uppercase truncate mr-2">Enable Effect</span>
-                                <input
-                                    type="checkbox"
-                                    checked={effect.params.showEffect as boolean}
-                                    onChange={(e) => updateEffectParam(layerId, effect.id, 'showEffect', e.target.checked)}
-                                    className="h-3 w-3 rounded border-border bg-secondary text-primary accent-primary"
-                                />
-                            </div>
-
-                            {/* Main algorithm/pattern selector */}
-                            <div className="space-y-1">
-                                <span className="text-muted-foreground font-mono uppercase text-[10px]">Pattern</span>
-                                <div className="flex bg-secondary/50 p-0.5 rounded border border-border">
-                                    {['F-S', 'Bayer', 'Random'].map(pat => (
-                                        <button
-                                            key={pat}
-                                            onClick={() => updateEffectParam(layerId, effect.id, 'pattern', pat)}
-                                            className={`flex-1 text-[10px] font-mono py-1 rounded transition-colors ${effect.params.pattern === pat ? 'bg-primary text-primary-foreground font-bold' : 'hover:bg-secondary text-muted-foreground'}`}
-                                        >
-                                            {pat}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-
-                            <SliderParam label="Threshold" paramKey="threshold" effect={effect} layerId={layerId} val={effect.params.threshold as number} />
-                            <SliderParam label="Pixel Size" paramKey="pixelSize" effect={effect} layerId={layerId} val={effect.params.pixelSize as number} />
-
-                            {/* Color Mode Section */}
-                            <div className="pt-3 border-t border-border/10 space-y-2">
-                                <div className="flex justify-between items-center text-[10px]">
-                                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">Use Original Colors</span>
-                                    <input
-                                        type="checkbox"
-                                        checked={effect.params.useColorMode as boolean}
-                                        onChange={(e) => updateEffectParam(layerId, effect.id, 'useColorMode', e.target.checked)}
-                                        className="h-3 w-3 rounded border-border bg-secondary text-primary accent-primary"
-                                    />
-                                </div>
-                                {!effect.params.useColorMode && (
-                                    <div className="space-y-2 mt-2">
-                                        <div className="flex justify-between items-center text-[10px]">
-                                            <span className="text-muted-foreground font-mono uppercase truncate mr-2">Palette Mode</span>
-                                            <select
-                                                value={effect.params.colorMode as string}
-                                                onChange={(e) => updateEffectParam(layerId, effect.id, 'colorMode', e.target.value)}
-                                                className="bg-secondary/50 border border-border rounded px-1.5 py-0.5 text-right font-mono text-primary focus:outline-none focus:ring-1 focus:ring-primary h-6 max-w-[120px]"
-                                            >
-                                                {['monochrome', 'duotone', 'tritone'].map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                                            </select>
-                                        </div>
-
-                                        {effect.params.colorMode === 'monochrome' && (
-                                            <div className="flex justify-between items-center text-[10px]">
-                                                <span className="text-muted-foreground font-mono uppercase truncate mr-2">Transparent Background</span>
-                                                <input
-                                                    type="checkbox"
-                                                    checked={effect.params.transparentBg as boolean}
-                                                    onChange={(e) => updateEffectParam(layerId, effect.id, 'transparentBg', e.target.checked)}
-                                                    className="h-3 w-3 rounded border-border bg-secondary text-primary accent-primary"
-                                                />
-                                            </div>
-                                        )}
-
-                                        <div className="flex justify-between items-center text-[10px]">
-                                            <span className="text-muted-foreground font-mono uppercase truncate mr-2">{effect.params.transparentBg ? 'Color' : 'Shadows'}</span>
-                                            <input type="color" value={effect.params.shadows as string} onChange={(e) => updateEffectParam(layerId, effect.id, 'shadows', e.target.value)} className="h-5 w-8 p-0 border-0 rounded cursor-pointer bg-transparent" disabled={effect.params.colorMode === 'monochrome' && effect.params.transparentBg as boolean} style={{ opacity: effect.params.colorMode === 'monochrome' && effect.params.transparentBg ? 0.2 : 1 }} />
-                                        </div>
-                                        {effect.params.colorMode !== 'monochrome' && effect.params.colorMode !== 'duotone' && (
-                                            <div className="flex justify-between items-center text-[10px]">
-                                                <span className="text-muted-foreground font-mono uppercase truncate mr-2">Midtones</span>
-                                                <input type="color" value={effect.params.midtones as string} onChange={(e) => updateEffectParam(layerId, effect.id, 'midtones', e.target.value)} className="h-5 w-8 p-0 border-0 rounded cursor-pointer bg-transparent" />
-                                            </div>
-                                        )}
-                                        <div className="flex justify-between items-center text-[10px]">
-                                            <span className="text-muted-foreground font-mono uppercase truncate mr-2">{effect.params.transparentBg && effect.params.colorMode === 'monochrome' ? 'Color' : 'Highlights'}</span>
-                                            <input type="color" value={effect.params.highlights as string} onChange={(e) => updateEffectParam(layerId, effect.id, 'highlights', e.target.value)} className="h-5 w-8 p-0 border-0 rounded cursor-pointer bg-transparent" />
-                                        </div>
-                                        {/* Presets Grid */}
-                                        <div className="mt-3 grid grid-cols-2 gap-2 text-[9px] uppercase tracking-wider font-bold">
-                                            <button className="bg-secondary hover:bg-primary transition-colors hover:text-primary-foreground py-1 rounded"
-                                                onClick={() => { updateEffectParam(layerId, effect.id, 'shadows', '#000000'); updateEffectParam(layerId, effect.id, 'midtones', '#808080'); updateEffectParam(layerId, effect.id, 'highlights', '#ffffff'); }}>Minimal</button>
-                                            <button className="bg-secondary hover:bg-primary transition-colors hover:text-primary-foreground py-1 rounded"
-                                                onClick={() => { updateEffectParam(layerId, effect.id, 'shadows', '#43523d'); updateEffectParam(layerId, effect.id, 'midtones', '#8cb484'); updateEffectParam(layerId, effect.id, 'highlights', '#c7f0d8'); }}>Nokia</button>
-                                            <button className="bg-secondary hover:bg-primary transition-colors hover:text-primary-foreground py-1 rounded"
-                                                onClick={() => { updateEffectParam(layerId, effect.id, 'shadows', '#1b2f15'); updateEffectParam(layerId, effect.id, 'midtones', '#4c8742'); updateEffectParam(layerId, effect.id, 'highlights', '#b3e8a6'); }}>Garden</button>
-                                            <button className="bg-secondary hover:bg-primary transition-colors hover:text-primary-foreground py-1 rounded"
-                                                onClick={() => { updateEffectParam(layerId, effect.id, 'shadows', '#0a0a1a'); updateEffectParam(layerId, effect.id, 'midtones', '#4a4a8a'); updateEffectParam(layerId, effect.id, 'highlights', '#e0e0ff'); }}>Star</button>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-
-                            {/* Preprocessing Group */}
-                            <div className="pt-3 border-t border-border/10 space-y-2">
-                                <div className="flex justify-between items-center text-[10px]">
-                                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">Image Preprocessing</span>
-                                    <input
-                                        type="checkbox"
-                                        checked={effect.params.imagePreprocessing as boolean}
-                                        onChange={(e) => updateEffectParam(layerId, effect.id, 'imagePreprocessing', e.target.checked)}
-                                        className="h-3 w-3 rounded border-border bg-secondary text-primary accent-primary"
-                                    />
-                                </div>
-
-                                {effect.params.imagePreprocessing && (
-                                    <div className="space-y-4 mt-3 pl-3 border-l-2 border-border/20">
-                                        <SliderParam label="Pre-Blur" paramKey="preBlur" effect={effect} layerId={layerId} val={effect.params.preBlur as number} />
-                                        <SliderParam label="Pre-Grain" paramKey="preGrain" effect={effect} layerId={layerId} val={effect.params.preGrain as number} />
-                                        <SliderParam label="Gamma Factor" paramKey="preGamma" effect={effect} layerId={layerId} val={effect.params.preGamma as number} />
-                                        <SliderParam label="Black Point" paramKey="preBlackPoint" effect={effect} layerId={layerId} val={effect.params.preBlackPoint as number} />
-                                        <SliderParam label="White Point" paramKey="preWhitePoint" effect={effect} layerId={layerId} val={effect.params.preWhitePoint as number} />
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    )}
+                    {spec.controls.map((control) => renderControl(control))}
                 </div>
-            )
-            }
-        </div >
+            )}
+        </div>
     );
 };
 
-// ─── Main EffectsPanel Component ────────────────────────────────────────
-
 export const EffectsPanel = () => {
-    const layers = useEditorStore(s => s.layers);
-    const activeLayerId = useEditorStore(s => s.activeLayerId);
-    const addEffectToLayer = useEditorStore(s => s.addEffectToLayer);
-    const reorderEffects = useEditorStore(s => s.reorderEffects);
+    const layers = useEditorStore((s) => s.layers);
+    const activeLayerId = useEditorStore((s) => s.activeLayerId);
+    const addEffectToLayer = useEditorStore((s) => s.addEffectToLayer);
+    const reorderEffects = useEditorStore((s) => s.reorderEffects);
 
     const activeLayer = activeLayerId ? layers[activeLayerId] : null;
 
@@ -555,18 +592,11 @@ export const EffectsPanel = () => {
         isResizing.current = false;
     }, []);
 
-    const resize = useCallback(
-        (e: MouseEvent) => {
-            if (isResizing.current) {
-                const newWidth = window.innerWidth - e.clientX;
-                if (newWidth > 200 && newWidth < 600) {
-                    setWidth(newWidth);
-                    setIsMinimized(false);
-                }
-            }
-        },
-        []
-    );
+    const resize = useCallback((event: MouseEvent) => {
+        if (!isResizing.current) return;
+        const newWidth = window.innerWidth - event.clientX;
+        setWidth(Math.max(250, Math.min(newWidth, 520)));
+    }, []);
 
     useEffect(() => {
         window.addEventListener('mousemove', resize);
@@ -577,28 +607,55 @@ export const EffectsPanel = () => {
         };
     }, [resize, stopResizing]);
 
-    const sensors = useSensors(
-        useSensor(PointerSensor, { activationConstraint: { distance: 4 } })
-    );
+    useEffect(() => {
+        if (effectMenuOpen && searchInputRef.current) {
+            requestAnimationFrame(() => searchInputRef.current?.focus());
+        }
+    }, [effectMenuOpen]);
+
+    const sensors = useSensors(useSensor(PointerSensor, {
+        activationConstraint: { distance: 4 },
+    }));
 
     const handleDragEnd = (event: DragEndEvent) => {
-        if (!activeLayer) return;
         const { active, over } = event;
-        if (!over || active.id === over.id) return;
+        if (!activeLayer || !over || active.id === over.id) return;
 
-        const fromIndex = activeLayer.effects.findIndex(e => e.id === active.id);
-        const toIndex = activeLayer.effects.findIndex(e => e.id === over.id);
+        const fromIndex = activeLayer.effects.findIndex((item) => item.id === active.id);
+        const toIndex = activeLayer.effects.findIndex((item) => item.id === over.id);
         if (fromIndex !== -1 && toIndex !== -1) {
             reorderEffects(activeLayer.id, fromIndex, toIndex);
         }
     };
 
+    const filtered = useMemo(
+        () => effectRegistry.getAll().filter((effect) => effect.name.toLowerCase().includes(effectSearch.toLowerCase())),
+        [effectSearch],
+    );
+
+    const groupedEffects = useMemo(() => {
+        const groups: Record<string, typeof filtered> = {
+            'Color Adjustments': [],
+            'Stylization & Generative Art': [],
+            'Filters & Convolutions': [],
+            'Other': []
+        };
+
+        filtered.forEach(effect => {
+            const cat = EFFECT_CATEGORIES[effect.id] || 'Other';
+            if (!groups[cat]) groups[cat] = [];
+            groups[cat].push(effect);
+        });
+
+        return groups;
+    }, [filtered]);
+
     return (
         <div
-            className={`h-full bg-card border-l border-border flex flex-col text-xs relative shrink-0 whitespace-nowrap overflow-hidden ${isResizing.current ? '' : 'transition-[width] duration-300 ease-in-out'}`}
+            className={`h-full bg-card border-l border-border flex flex-col text-xs relative shrink-0 whitespace-nowrap overflow-hidden ${isResizing.current ? '' : 'transition-[width] duration-300 ease-in-out'
+                }`}
             style={{ width: isMinimized ? 48 : `${width}px` }}
         >
-            {/* Drag Handle */}
             {!isMinimized && (
                 <div
                     className="absolute top-0 left-0 w-1.5 h-full cursor-col-resize hover:bg-primary/50 transition-colors z-10"
@@ -606,8 +663,7 @@ export const EffectsPanel = () => {
                 />
             )}
 
-            {/* Header / Tabs */}
-            <div className={`flex flex-col border-b border-border bg-secondary/50 w-full`}>
+            <div className="flex flex-col border-b border-border bg-secondary/50 w-full">
                 <div className={`p-4 flex ${isMinimized ? 'justify-center' : 'justify-between'} items-center uppercase tracking-wider`}>
                     {!isMinimized && (
                         <h2 className="font-bold text-xs flex items-center gap-1.5 truncate">
@@ -616,54 +672,50 @@ export const EffectsPanel = () => {
                         </h2>
                     )}
                     <div className="flex items-center gap-1 shrink-0">
-                        <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-foreground" onClick={() => setIsMinimized(!isMinimized)}>
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                            onClick={() => setIsMinimized((prev) => !prev)}
+                        >
                             {isMinimized ? <PanelRight size={16} /> : <PanelRightClose size={16} />}
                         </Button>
                     </div>
                 </div>
-
-                {/* Removed tabs */}
             </div>
 
-            {/* Content */}
             {!isMinimized ? (
                 <div className="flex-1 overflow-y-auto w-full relative">
                     <PropertiesPanel />
-                    {activeLayer && (
-                        <>
-                            <div className="bg-secondary/30 px-4 py-2 border-y border-border flex items-center gap-2">
-                                <h3 className="font-bold text-[10px] uppercase tracking-widest text-muted-foreground">Effects</h3>
-                            </div>
-                            {activeLayer.effects.length === 0 ? (
-                                <div className="text-muted-foreground text-center py-8 font-mono uppercase tracking-wider border border-dashed border-border m-3 text-[10px]">
-                                    <Settings2 size={16} className="mx-auto mb-2 text-muted-foreground/50" />
-                                    No effects on<br />
-                                    <span className="text-foreground">{activeLayer.name}</span>
-                                </div>
-                            ) : (
-                                <div className="pb-16 flex flex-col">
-                                    <DndContext
-                                        sensors={sensors}
-                                        collisionDetection={closestCenter}
-                                        onDragEnd={handleDragEnd}
-                                    >
-                                        <SortableContext
-                                            items={activeLayer.effects.map(e => e.id)}
-                                            strategy={verticalListSortingStrategy}
-                                        >
-                                            {activeLayer.effects.map((effect, index) => (
-                                                <SortableEffectCard
-                                                    key={effect.id}
-                                                    effect={effect}
-                                                    layerId={activeLayer.id}
-                                                    index={index}
-                                                />
-                                            ))}
-                                        </SortableContext>
-                                    </DndContext>
-                                </div>
-                            )}
-                        </>
+
+                    <div className="bg-secondary/30 px-4 py-2 border-y border-border flex items-center gap-2">
+                        <h3 className="font-bold text-[10px] uppercase tracking-widest text-muted-foreground">Effects</h3>
+                    </div>
+
+                    {!activeLayer ? (
+                        <div className="text-muted-foreground text-center py-8 font-mono uppercase tracking-wider border border-dashed border-border m-3 text-[10px]">
+                            <Settings2 size={16} className="mx-auto mb-2 text-muted-foreground/50" />
+                            Select a layer to edit effects.
+                        </div>
+                    ) : activeLayer.effects.length === 0 ? (
+                        <div className="text-muted-foreground text-center py-8 font-mono uppercase tracking-wider border border-dashed border-border m-3 text-[10px]">
+                            <Settings2 size={16} className="mx-auto mb-2 text-muted-foreground/50" />
+                            No effects on<br />
+                            <span className="text-foreground">{activeLayer.name}</span>
+                        </div>
+                    ) : (
+                        <div className="pb-16 flex flex-col">
+                            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                                <SortableContext
+                                    items={activeLayer.effects.map((effect) => effect.id)}
+                                    strategy={verticalListSortingStrategy}
+                                >
+                                    {activeLayer.effects.map((effect) => (
+                                        <SortableEffectCard key={effect.id} effect={effect} layerId={activeLayer.id} />
+                                    ))}
+                                </SortableContext>
+                            </DndContext>
+                        </div>
                     )}
                 </div>
             ) : (
@@ -672,51 +724,57 @@ export const EffectsPanel = () => {
                 </div>
             )}
 
-            {/* Footer Action */}
             {!isMinimized && activeLayer && (
                 <div className="p-3 border-t border-border bg-secondary/30 flex justify-center w-full relative z-20 shrink-0">
-                    <DropdownMenu open={effectMenuOpen} onOpenChange={(open) => {
-                        setEffectMenuOpen(open);
-                        if (open) {
-                            setEffectSearch('');
-                            setTimeout(() => searchInputRef.current?.focus(), 0);
-                        }
-                    }}>
+                    <DropdownMenu
+                        open={effectMenuOpen}
+                        onOpenChange={(open) => {
+                            setEffectMenuOpen(open);
+                            if (!open) setEffectSearch('');
+                        }}
+                    >
                         <DropdownMenuTrigger asChild>
-                            <Button variant="outline" className="w-full text-xs font-bold uppercase tracking-wider">
+                            <Button variant="outline" size="sm" className="w-full text-xs font-bold uppercase tracking-wider">
                                 <Plus size={14} className="mr-2" /> Add Effect
                             </Button>
                         </DropdownMenuTrigger>
-                        <DropdownMenuContent side="top" align="center" className="w-56 bg-card border-border max-h-[400px] overflow-y-auto">
-                            <div className="p-1.5 sticky top-0 bg-card z-10 border-b border-border/50">
+                        <DropdownMenuContent side="top" align="center" className="w-64 bg-card border-border max-h-[600px] overflow-y-auto">
+                            <div className="px-2 py-2 border-b border-border/60 sticky top-0 bg-card z-20">
                                 <div className="relative">
                                     <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
                                     <input
                                         ref={searchInputRef}
-                                        type="text"
-                                        placeholder="Search effects…"
+                                        className="w-full h-7 pl-7 pr-2 rounded border border-border bg-secondary/30 text-[11px]"
+                                        placeholder="Search effects..."
                                         value={effectSearch}
-                                        onChange={(e) => setEffectSearch(e.target.value)}
-                                        onKeyDown={(e) => e.stopPropagation()}
-                                        className="w-full bg-secondary/50 border border-border rounded pl-7 pr-2 py-1.5 text-xs font-mono placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary focus:bg-secondary transition-colors"
+                                        onChange={(event) => setEffectSearch(event.target.value)}
+                                        onKeyDown={(event) => event.stopPropagation()}
                                     />
                                 </div>
                             </div>
-                            {AVAILABLE_EFFECTS
-                                .filter(e => e.label.toLowerCase().includes(effectSearch.toLowerCase()))
-                                .map((effect) => (
-                                    <DropdownMenuItem
-                                        key={effect.id}
-                                        onClick={() => addEffectToLayer(activeLayer.id, effect.id, effect.defaultParams)}
-                                        className="cursor-pointer hover:bg-primary hover:text-primary-foreground font-bold text-xs uppercase tracking-wider"
-                                    >
-                                        {effect.label}
-                                    </DropdownMenuItem>
-                                ))}
-                            {AVAILABLE_EFFECTS.filter(e => e.label.toLowerCase().includes(effectSearch.toLowerCase())).length === 0 && (
-                                <div className="text-center text-muted-foreground text-[10px] py-4 font-mono uppercase tracking-wider">
-                                    No effects found
-                                </div>
+
+                            {Object.entries(groupedEffects).map(([category, effects]) => {
+                                if (effects.length === 0) return null;
+                                return (
+                                    <div key={category} className="mb-2 last:mb-0">
+                                        <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground bg-secondary/40 sticky top-[45px] z-10 backdrop-blur-md border-b border-border/40">
+                                            {category}
+                                        </div>
+                                        {effects.map((effect) => (
+                                            <DropdownMenuItem
+                                                key={effect.id}
+                                                onClick={() => addEffectToLayer(activeLayer.id, effect.id, effect.defaultParams)}
+                                                className="cursor-pointer text-[11px] flex justify-between rounded-none px-3"
+                                            >
+                                                <span>{effect.name}</span>
+                                            </DropdownMenuItem>
+                                        ))}
+                                    </div>
+                                );
+                            })}
+
+                            {filtered.length === 0 && (
+                                <div className="px-3 py-2 text-[10px] text-muted-foreground">No effects found</div>
                             )}
                         </DropdownMenuContent>
                     </DropdownMenu>

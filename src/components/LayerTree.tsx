@@ -2,30 +2,32 @@ import { useEditorStore } from '@/store/editorStore';
 import type { Layer, LayerKind } from '@/store/editorStore';
 import {
     DndContext,
+    closestCenter,
     pointerWithin,
     PointerSensor,
     useSensor,
     useSensors,
-    useDraggable,
-    useDroppable,
-    useDndContext,
-    DragOverlay,
-    defaultDropAnimationSideEffects,
-    type DragStartEvent,
+    type CollisionDetection,
     type DragOverEvent,
     type DragEndEvent,
 } from '@dnd-kit/core';
+import {
+    SortableContext,
+    useSortable,
+    verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import {
     Image as ImageIcon,
     Sliders,
     Folder,
     CircleDashed,
+    Palette,
     Eye,
     EyeOff,
     Trash2,
     ChevronDown,
     ChevronRight,
-    Plus,
     GripVertical,
     Upload,
     PanelLeftClose,
@@ -48,11 +50,13 @@ import {
     ContextMenuSeparator,
     ContextMenuTrigger,
 } from '@/components/ui/context-menu';
+import { importLayerImageFromFile, LAYER_UPLOAD_ACCEPT } from '@/lib/importLayerFile';
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 
 // Icon for each layer kind
 const LAYER_ICONS: Record<LayerKind, React.ElementType> = {
     image: ImageIcon,
+    solid: Palette,
     adjustment: Sliders,
     group: Folder,
     mask: CircleDashed,
@@ -61,19 +65,26 @@ const LAYER_ICONS: Record<LayerKind, React.ElementType> = {
 // Colors for layer kind badges
 const KIND_COLORS: Record<LayerKind, string> = {
     image: 'text-blue-400',
+    solid: 'text-rose-400',
     adjustment: 'text-amber-400',
     group: 'text-emerald-400',
     mask: 'text-purple-400',
 };
 
 // ─── Draggable/Droppable Layer Row ─────────────────────────────────────────
+type DropIntent = 'before' | 'after' | 'into';
+const layerCollisionDetection: CollisionDetection = (args) => {
+    const pointerHits = pointerWithin(args);
+    if (pointerHits.length > 0) return pointerHits;
+    return closestCenter(args);
+};
+
 interface LayerRowProps {
     layer: Layer;
     isActive: boolean;
     depth: number;
-    intent?: 'before' | 'after' | 'into' | null;
     isDropTarget?: boolean;
-    isOverlay?: boolean;
+    dropIntent?: DropIntent | null;
     maskedBy?: string | null; // name of the mask layer that affects this layer
     onStartRename?: (id: string) => void;
     isRenaming?: boolean;
@@ -83,15 +94,9 @@ interface LayerRowProps {
     onRenameCancel?: () => void;
 }
 
-const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay, maskedBy, onStartRename, isRenaming, renameValue, onRenameChange, onRenameCommit, onRenameCancel }: LayerRowProps) => {
-    const { attributes, listeners, setNodeRef: setDraggableRef, isDragging } = useDraggable({
+const LayerRow = ({ layer, isActive, depth, isDropTarget, dropIntent, maskedBy, onStartRename, isRenaming, renameValue, onRenameChange, onRenameCommit, onRenameCancel }: LayerRowProps) => {
+    const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
         id: layer.id,
-        data: { layer }
-    });
-
-    const { setNodeRef: setDroppableRef } = useDroppable({
-        id: layer.id,
-        data: { layer }
     });
 
     const setActiveLayer = useEditorStore(s => s.setActiveLayer);
@@ -111,22 +116,17 @@ const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay, mas
 
     const Icon = LAYER_ICONS[layer.kind];
     const kindColor = KIND_COLORS[layer.kind];
-
-    const setNodeRef = (node: HTMLElement | null) => {
-        if (!isOverlay) {
-            setDraggableRef(node);
-            setDroppableRef(node);
-        }
+    const style = {
+        transform: CSS.Transform.toString(transform),
+        transition,
     };
+    const isNesting = isDropTarget && dropIntent === 'into';
 
-    const isNesting = isDropTarget && intent === 'into';
-
-    // Drop indicator styles
     let dropIndicator = null;
-    if (isDropTarget && !isOverlay) {
-        if (intent === 'before') {
+    if (isDropTarget) {
+        if (dropIntent === 'before') {
             dropIndicator = <div className="absolute top-0 left-0 right-0 h-0.5 bg-blue-500 z-10 pointer-events-none" />;
-        } else if (intent === 'after') {
+        } else if (dropIntent === 'after') {
             dropIndicator = <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-500 z-10 pointer-events-none" />;
         }
     }
@@ -139,25 +139,26 @@ const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay, mas
     const rowContent = (
         <div
             ref={setNodeRef}
-            style={{ paddingLeft: `${12 + depth * 16}px` }}
+            style={{ ...style, paddingLeft: `${12 + depth * 16}px` }}
             className={`
                 relative flex items-center gap-2 py-3 pr-2 border-b border-border/50 group cursor-pointer overflow-hidden
                 transition-colors text-xs uppercase tracking-wider
-                ${isActive && !isOverlay ? 'bg-primary/10 border-l-2 border-l-primary' : 'hover:bg-secondary/30 border-l-2 border-l-transparent'}
-                ${!layer.visible && !isOverlay ? 'opacity-40' : ''}
-                ${isDragging && !isOverlay ? 'opacity-30' : ''}
-                ${isOverlay ? 'bg-card border shadow-xl opacity-90 cursor-grabbing' : ''}
+                ${isActive ? 'bg-primary/10 border-l-2 border-l-primary' : 'hover:bg-secondary/30 border-l-2 border-l-transparent'}
+                ${!layer.visible ? 'opacity-40' : ''}
+                ${isDragging ? 'opacity-30 z-50 shadow-xl' : ''}
                 ${isNesting ? 'ring-2 ring-emerald-500 ring-inset bg-emerald-500/10' : ''}
             `}
-            onClick={() => { if (!isOverlay) setActiveLayer(layer.id); }}
+            onClick={() => setActiveLayer(layer.id)}
         >
             {dropIndicator}
 
             {/* Drag handle */}
             <button
-                className={`shrink-0 p-0.5 ${isOverlay ? 'cursor-grabbing text-foreground' : 'text-muted-foreground/40 hover:text-muted-foreground cursor-grab active:cursor-grabbing'}`}
+                className="shrink-0 p-1 text-muted-foreground/40 hover:text-muted-foreground cursor-grab active:cursor-grabbing"
                 {...attributes}
                 {...listeners}
+                onClick={(e) => e.stopPropagation()}
+                aria-label="Drag to reorder layer"
             >
                 <GripVertical size={14} />
             </button>
@@ -165,8 +166,9 @@ const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay, mas
             {/* Group collapse toggle */}
             {layer.kind === 'group' ? (
                 <button
-                    className="text-muted-foreground hover:text-foreground shrink-0 z-10 relative p-0.5"
+                    className="text-muted-foreground hover:text-foreground shrink-0 z-10 relative p-1"
                     onClick={(e) => { e.stopPropagation(); toggleCollapsed(layer.id); }}
+                    aria-label={layer.collapsed ? 'Expand group' : 'Collapse group'}
                 >
                     {layer.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                 </button>
@@ -180,15 +182,15 @@ const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay, mas
             {/* Name – inline rename overlays static label to avoid row resize */}
             <div className="relative flex-1 min-w-0">
                 <span
-                    className={`block truncate font-bold text-xs select-none ${isRenaming && !isOverlay ? 'opacity-0 pointer-events-none' : 'pointer-events-auto'}`}
+                    className={`block truncate font-bold text-xs select-none ${isRenaming ? 'opacity-0 pointer-events-none' : 'pointer-events-auto'}`}
                     onDoubleClick={(e) => {
                         e.stopPropagation();
-                        if (!isOverlay) onStartRename?.(layer.id);
+                        onStartRename?.(layer.id);
                     }}
                 >
                     {layer.name}
                 </span>
-                {isRenaming && !isOverlay && (
+                {isRenaming && (
                     <input
                         ref={renameInputRef}
                         type="text"
@@ -224,53 +226,48 @@ const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay, mas
             )}
 
             {/* Visibility */}
-            {!isOverlay && (
-                <button
-                    className="text-muted-foreground hover:text-foreground shrink-0 z-10 relative p-0.5"
-                    onClick={(e) => { e.stopPropagation(); toggleVisibility(layer.id); }}
-                >
-                    {layer.visible ? <Eye size={14} /> : <EyeOff size={14} />}
-                </button>
-            )}
+            <button
+                className="text-muted-foreground hover:text-foreground shrink-0 z-10 relative p-1"
+                onClick={(e) => { e.stopPropagation(); toggleVisibility(layer.id); }}
+                aria-label={layer.visible ? 'Hide layer' : 'Show layer'}
+            >
+                {layer.visible ? <Eye size={14} /> : <EyeOff size={14} />}
+            </button>
 
             {/* 3-dots menu */}
-            {!isOverlay && (
-                <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                        <button
-                            className="text-muted-foreground hover:text-foreground shrink-0 z-10 relative p-0.5"
-                            onClick={(e) => e.stopPropagation()}
-                        >
-                            <MoreHorizontal size={14} />
-                        </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-44">
-                        <DropdownMenuItem
-                            onClick={() => onStartRename?.(layer.id)}
-                            className="cursor-pointer text-xs font-bold uppercase tracking-wider gap-2"
-                        >
-                            <Pencil size={12} /> Rename
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                            onClick={() => duplicateLayer(layer.id)}
-                            className="cursor-pointer text-xs font-bold uppercase tracking-wider gap-2"
-                        >
-                            <Copy size={12} /> Duplicate
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                            onClick={() => removeLayer(layer.id)}
-                            className="cursor-pointer text-xs font-bold uppercase tracking-wider gap-2 text-destructive focus:text-destructive"
-                        >
-                            <Trash2 size={12} /> Delete
-                        </DropdownMenuItem>
-                    </DropdownMenuContent>
-                </DropdownMenu>
-            )}
+            <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                    <button
+                        className="text-muted-foreground hover:text-foreground shrink-0 z-10 relative p-1"
+                        onClick={(e) => e.stopPropagation()}
+                        aria-label="Layer actions"
+                    >
+                        <MoreHorizontal size={14} />
+                    </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-44">
+                    <DropdownMenuItem
+                        onClick={() => onStartRename?.(layer.id)}
+                        className="cursor-pointer text-xs font-bold uppercase tracking-wider gap-2"
+                    >
+                        <Pencil size={12} /> Rename
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                        onClick={() => duplicateLayer(layer.id)}
+                        className="cursor-pointer text-xs font-bold uppercase tracking-wider gap-2"
+                    >
+                        <Copy size={12} /> Duplicate
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                        onClick={() => removeLayer(layer.id)}
+                        className="cursor-pointer text-xs font-bold uppercase tracking-wider gap-2 text-destructive focus:text-destructive"
+                    >
+                        <Trash2 size={12} /> Delete
+                    </DropdownMenuItem>
+                </DropdownMenuContent>
+            </DropdownMenu>
         </div>
     );
-
-    // Wrap overlay rows without context menu
-    if (isOverlay) return rowContent;
 
     return (
         <ContextMenu>
@@ -302,38 +299,15 @@ const LayerRow = ({ layer, isActive, depth, intent, isDropTarget, isOverlay, mas
     );
 };
 
-// ─── Root Drop Zone (for easy un-nesting) ──────────────────────────────
-const RootDropZone = () => {
-    const { setNodeRef, isOver } = useDroppable({
-        id: 'ROOT_ZONE',
-        data: { isRootZone: true }
-    });
-
-    const { active } = useDndContext();
-    const isDragging = !!active;
-
-    return (
-        <div
-            ref={setNodeRef}
-            className={`w-full overflow-hidden shrink-0 transition-all flex flex-col items-center justify-center 
-                ${isDragging ? 'min-h-[80px] opacity-100 mt-4 border-2 border-dashed border-border' : 'h-0 min-h-0 opacity-0 m-0 border-0'}
-                ${isOver ? 'bg-emerald-500/10 border-emerald-500 border-solid' : ''}
-            `}
-        >
-            <span className={`text-[10px] uppercase tracking-wider font-bold transition-colors ${isOver ? 'text-emerald-500' : 'text-muted-foreground'}`}>
-                Drop at Root
-            </span>
-        </div>
-    );
-};
-
 // ─── Main LayerTree Component ───────────────────────────────────────────
 export const LayerTree = () => {
     const layers = useEditorStore(s => s.layers);
     const layerOrder = useEditorStore(s => s.layerOrder);
     const activeLayerId = useEditorStore(s => s.activeLayerId);
+    const asciiImportFontId = useEditorStore(s => s.asciiImportFontId);
     const moveLayerToPosition = useEditorStore(s => s.moveLayerToPosition);
     const addImageLayer = useEditorStore(s => s.addImageLayer);
+    const addSolidLayer = useEditorStore(s => s.addSolidLayer);
     const addAdjustmentLayer = useEditorStore(s => s.addAdjustmentLayer);
     const addGroup = useEditorStore(s => s.addGroup);
     const addMaskLayer = useEditorStore(s => s.addMaskLayer);
@@ -341,12 +315,10 @@ export const LayerTree = () => {
 
     const fileInputRef = useRef<HTMLInputElement>(null);
 
-    const [activeDragId, setActiveDragId] = useState<string | null>(null);
-    const [dropState, setDropState] = useState<{ overId: string; intent: 'before' | 'after' | 'into' } | null>(null);
-
     // Rename state
     const [renamingId, setRenamingId] = useState<string | null>(null);
     const [renameValue, setRenameValue] = useState('');
+    const [dropState, setDropState] = useState<{ overId: string; intent: DropIntent } | null>(null);
 
     const startRename = useCallback((id: string) => {
         const layer = useEditorStore.getState().layers[id];
@@ -405,70 +377,21 @@ export const LayerTree = () => {
         useSensor(PointerSensor, { activationConstraint: { distance: 4 } })
     );
 
-    const handleDragStart = (event: DragStartEvent) => {
-        setActiveDragId(event.active.id as string);
-        setDropState(null);
-    };
-
-    const handleDragOver = (event: DragOverEvent) => {
-        const { active, over } = event;
-        if (!over || active.id === over.id) {
-            setDropState(null);
-            return;
-        }
-
-        if (over.id === 'ROOT_ZONE') {
-            setDropState({ overId: 'ROOT_ZONE', intent: 'into' });
-            return;
-        }
-
-        const activeRect = active.rect.current.translated;
-        const overRect = over.rect;
-
-        if (activeRect && overRect) {
-            const activeCenterY = activeRect.top + activeRect.height / 2;
-            const overHeight = overRect.height;
-            const offset = activeCenterY - overRect.top;
-
-            const layer = layers[over.id as string];
-            let intent: 'before' | 'after' | 'into' = 'after';
-
-            if (layer?.kind === 'group') {
-                if (offset < overHeight * 0.1) intent = 'before';
-                else if (offset > overHeight * 0.9) intent = 'after';
-                else intent = 'into';
-            } else {
-                intent = offset < overHeight * 0.5 ? 'before' : 'after';
-            }
-
-            setDropState({ overId: over.id as string, intent });
-        }
-    };
-
-    const handleDragEnd = (event: DragEndEvent) => {
-        if (dropState && dropState.overId !== event.active.id) {
-            moveLayerToPosition(event.active.id as string, dropState.overId, dropState.intent);
-        }
-        setActiveDragId(null);
-        setDropState(null);
-    };
-
-    const handleDragCancel = () => {
-        setActiveDragId(null);
-        setDropState(null);
-    };
-
-    const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
-        const url = URL.createObjectURL(file);
-        const img = new Image();
-        img.onload = () => {
-            addImageLayer(img, file.name.replace(/\.[^.]+$/, ''));
-            URL.revokeObjectURL(url);
-        };
-        img.src = url;
-        e.target.value = '';
+
+        try {
+            const { image, name, asciiTextSource } = await importLayerImageFromFile(file, { asciiFontId: asciiImportFontId });
+            addImageLayer(image, name, {
+                asciiTextSource,
+                asciiTextFontId: asciiTextSource ? asciiImportFontId : undefined,
+            });
+        } catch (error) {
+            console.error('[Upload] Failed to import file:', error);
+        } finally {
+            e.target.value = '';
+        }
     };
 
     const buildRenderList = (): { layer: Layer; depth: number; maskedBy: string | null }[] => {
@@ -502,7 +425,78 @@ export const LayerTree = () => {
     };
 
     const renderList = buildRenderList();
-    const activeLayer = activeDragId ? layers[activeDragId] : null;
+    const sortableLayerIds = renderList.map(({ layer }) => layer.id);
+
+    const handleDragStart = () => {
+        setDropState(null);
+    };
+
+    const handleDragOver = (event: DragOverEvent) => {
+        const { active, over } = event;
+        // Keep the last valid drop target when collision jitters to null/self.
+        if (!over || active.id === over.id) return;
+
+        const overId = over.id as string;
+        const overLayer = layers[overId];
+        if (!overLayer) {
+            setDropState(null);
+            return;
+        }
+
+        const activeRect = active.rect.current.translated;
+        const overRect = over.rect;
+
+        let intent: DropIntent;
+
+        if (activeRect && overRect) {
+            const activeCenterY = activeRect.top + activeRect.height / 2;
+            const offset = activeCenterY - overRect.top;
+            const ratio = overRect.height > 0 ? offset / overRect.height : 0.5;
+
+            if (overLayer.kind === 'group') {
+                if (ratio < 0.15) intent = 'before';
+                else if (ratio > 0.85) intent = 'after';
+                else intent = 'into';
+            } else {
+                intent = ratio < 0.5 ? 'before' : 'after';
+            }
+        } else {
+            const fromIndex = sortableLayerIds.findIndex((id) => id === active.id);
+            const toIndex = sortableLayerIds.findIndex((id) => id === over.id);
+            intent = fromIndex !== -1 && toIndex !== -1 && fromIndex < toIndex ? 'after' : 'before';
+        }
+
+        setDropState({ overId, intent });
+    };
+
+    const handleDragEnd = (event: DragEndEvent) => {
+        const { active, over } = event;
+        const activeId = String(active.id);
+        const preferredOverId = dropState?.overId;
+        const fallbackOverId = over ? String(over.id) : null;
+        const targetOverId = preferredOverId ?? fallbackOverId;
+
+        if (!targetOverId || activeId === targetOverId) {
+            setDropState(null);
+            return;
+        }
+
+        const fromIndex = sortableLayerIds.findIndex((id) => id === activeId);
+        if (fromIndex === -1) {
+            setDropState(null);
+            return;
+        }
+        const toIndex = sortableLayerIds.findIndex((id) => id === targetOverId);
+        const targetLayer = layers[targetOverId];
+        const fallbackIntent: DropIntent = toIndex !== -1 && fromIndex < toIndex ? 'after' : 'before';
+        const intent: DropIntent = dropState?.intent ?? (targetLayer?.kind === 'group' ? 'into' : fallbackIntent);
+        moveLayerToPosition(activeId, targetOverId, intent);
+        setDropState(null);
+    };
+
+    const handleDragCancel = () => {
+        setDropState(null);
+    };
 
     return (
         <div
@@ -531,7 +525,7 @@ export const LayerTree = () => {
                     ref={fileInputRef}
                     type="file"
                     className="hidden"
-                    accept="image/png, image/jpeg, image/webp"
+                    accept={LAYER_UPLOAD_ACCEPT}
                     onChange={handleImageUpload}
                 />
             </div>
@@ -547,22 +541,24 @@ export const LayerTree = () => {
                     ) : (
                         <DndContext
                             sensors={sensors}
-                            collisionDetection={pointerWithin}
+                            collisionDetection={layerCollisionDetection}
                             onDragStart={handleDragStart}
                             onDragOver={handleDragOver}
                             onDragEnd={handleDragEnd}
                             onDragCancel={handleDragCancel}
                         >
-                            {renderList.map(({ layer, depth, maskedBy }) => {
-                                const isDropTarget = dropState?.overId === layer.id && activeDragId !== layer.id;
-                                return (
+                            <SortableContext
+                                items={sortableLayerIds}
+                                strategy={verticalListSortingStrategy}
+                            >
+                                {renderList.map(({ layer, depth, maskedBy }) => (
                                     <LayerRow
                                         key={layer.id}
                                         layer={layer}
                                         isActive={layer.id === activeLayerId}
                                         depth={depth}
-                                        isDropTarget={isDropTarget}
-                                        intent={isDropTarget ? dropState.intent : null}
+                                        isDropTarget={dropState?.overId === layer.id}
+                                        dropIntent={dropState?.overId === layer.id ? dropState.intent : null}
                                         maskedBy={maskedBy}
                                         onStartRename={startRename}
                                         isRenaming={renamingId === layer.id}
@@ -571,21 +567,8 @@ export const LayerTree = () => {
                                         onRenameCommit={commitRename}
                                         onRenameCancel={cancelRename}
                                     />
-                                );
-                            })}
-
-                            <RootDropZone />
-
-                            <DragOverlay dropAnimation={{ sideEffects: defaultDropAnimationSideEffects({ styles: { active: { opacity: '0.4' } } }) }}>
-                                {activeLayer ? (
-                                    <LayerRow
-                                        layer={activeLayer}
-                                        isActive={true}
-                                        depth={0}
-                                        isOverlay
-                                    />
-                                ) : null}
-                            </DragOverlay>
+                                ))}
+                            </SortableContext>
                         </DndContext>
                     )}
                 </div>
@@ -597,44 +580,52 @@ export const LayerTree = () => {
 
             {/* Footer Action */}
             {!isMinimized && (
-                <div className="p-3 border-t border-border bg-secondary/30 flex justify-center w-full relative z-20">
-                    <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                            <Button variant="outline" className="w-full text-xs font-bold uppercase tracking-wider">
-                                <Plus size={14} className="mr-2" /> Add Layer
-                            </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent side="top" align="center" className="w-48 bg-card border-border">
-                            <DropdownMenuItem
-                                onClick={() => fileInputRef.current?.click()}
-                                className="cursor-pointer hover:bg-primary hover:text-primary-foreground font-bold text-xs uppercase tracking-wider"
-                            >
-                                <ImageIcon size={12} className="mr-2 text-blue-400" />
-                                Image Layer
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                onClick={() => addAdjustmentLayer()}
-                                className="cursor-pointer hover:bg-primary hover:text-primary-foreground font-bold text-xs uppercase tracking-wider"
-                            >
-                                <Sliders size={12} className="mr-2 text-amber-400" />
-                                Adjustment Layer
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                onClick={() => addGroup()}
-                                className="cursor-pointer hover:bg-primary hover:text-primary-foreground font-bold text-xs uppercase tracking-wider"
-                            >
-                                <Folder size={12} className="mr-2 text-emerald-400" />
-                                Group
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                                onClick={() => addMaskLayer()}
-                                className="cursor-pointer hover:bg-primary hover:text-primary-foreground font-bold text-xs uppercase tracking-wider"
-                            >
-                                <CircleDashed size={12} className="mr-2 text-purple-400" />
-                                Mask Layer
-                            </DropdownMenuItem>
-                        </DropdownMenuContent>
-                    </DropdownMenu>
+                <div className="p-3 border-t border-border bg-secondary/30 grid grid-cols-5 gap-2 w-full relative z-20">
+                    <Button
+                        variant="outline"
+                        className="h-8 w-full px-0"
+                        onClick={() => fileInputRef.current?.click()}
+                        aria-label="Add image layer"
+                        title="Add image layer"
+                    >
+                        <ImageIcon size={14} className="text-blue-400" />
+                    </Button>
+                    <Button
+                        variant="outline"
+                        className="h-8 w-full px-0"
+                        onClick={() => addAdjustmentLayer()}
+                        aria-label="Add adjustment layer"
+                        title="Add adjustment layer"
+                    >
+                        <Sliders size={14} className="text-amber-400" />
+                    </Button>
+                    <Button
+                        variant="outline"
+                        className="h-8 w-full px-0"
+                        onClick={() => addGroup()}
+                        aria-label="Add group"
+                        title="Add group"
+                    >
+                        <Folder size={14} className="text-emerald-400" />
+                    </Button>
+                    <Button
+                        variant="outline"
+                        className="h-8 w-full px-0"
+                        onClick={() => addMaskLayer()}
+                        aria-label="Add mask layer"
+                        title="Add mask layer"
+                    >
+                        <CircleDashed size={14} className="text-purple-400" />
+                    </Button>
+                    <Button
+                        variant="outline"
+                        className="h-8 w-full px-0"
+                        onClick={() => addSolidLayer(undefined, '#000000')}
+                        aria-label="Add solid color layer"
+                        title="Add solid color layer"
+                    >
+                        <Palette size={14} className="text-rose-400" />
+                    </Button>
                 </div>
             )}
         </div>

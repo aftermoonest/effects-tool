@@ -3,10 +3,9 @@ import { LayerTree } from '@/components/LayerTree';
 import { EffectsPanel } from '@/components/EffectsPanel';
 import { CanvasViewport } from '@/components/CanvasViewport';
 import { useEditorStore } from '@/store/editorStore';
+import { TEMPLATE_GROUPS, loadImage } from '@/data/templateData';
 
 import { CanvasHeader } from '@/components/CanvasHeader';
-
-const DEFAULT_IMAGE_URL = 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=2564&auto=format&fit=crop';
 
 function App() {
   const initializedRef = useRef(false);
@@ -15,14 +14,23 @@ function App() {
     if (initializedRef.current) return;
     initializedRef.current = true;
 
-    const { layers, addImageLayer } = useEditorStore.getState();
+    const { layers, applyTemplate } = useEditorStore.getState();
     if (Object.keys(layers).length === 0) {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        addImageLayer(img, 'Default Image');
-      };
-      img.src = DEFAULT_IMAGE_URL;
+      (async () => {
+        try {
+          // Pick a random template
+          const randomTemplate = TEMPLATE_GROUPS[Math.floor(Math.random() * TEMPLATE_GROUPS.length)];
+
+          const [bgImg, overlayImg] = await Promise.all([
+            loadImage(randomTemplate.bgUrl),
+            loadImage(randomTemplate.overlayUrl, false),
+          ]);
+
+          applyTemplate(bgImg, overlayImg, randomTemplate.name);
+        } catch (error) {
+          console.warn('[App] Failed to load random template', error);
+        }
+      })();
     }
   }, []);
 

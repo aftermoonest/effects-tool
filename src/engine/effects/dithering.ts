@@ -1,9 +1,27 @@
-import type { EffectProvider } from '../types';
-import { ASCII_FONT } from '../Compositor';
+import type { EffectPlugin } from '../types';
+import type { EffectParams } from '@/store/editorStore';
 
-// ── Helper: Convert hex string to [r, g, b] normalized ──
+export interface DitheringParams {
+    pattern: string;
+    colorMode: string;
+    shadows: string;
+    midtones: string;
+    highlights: string;
+    imagePreprocessing: boolean;
+    preBlur: number;
+    preGrain: number;
+    preGamma: number;
+    preBlackPoint: number;
+    preWhitePoint: number;
+    showEffect: boolean;
+    pixelSize: number;
+    useColorMode: boolean;
+    threshold: number;
+    removeBgV2: boolean;
+}
+
 function hexToVec3(hex: string): [number, number, number] {
-    const h = hex.replace('#', '');
+    const h = String(hex ?? '#000000').replace('#', '').padEnd(6, '0').slice(0, 6);
     return [
         parseInt(h.substring(0, 2), 16) / 255,
         parseInt(h.substring(2, 4), 16) / 255,
@@ -11,10 +29,151 @@ function hexToVec3(hex: string): [number, number, number] {
     ];
 }
 
-// ── Dithering ────────────────────────────────────────────────────────────
-export const dithering: EffectProvider = {
+function coerceBooleanFlag(value: unknown, defaultValue = false): boolean {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    if (typeof value === 'string') {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') return true;
+        if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off' || normalized === '') return false;
+    }
+    return defaultValue;
+}
+
+export const dithering: EffectPlugin = {
     id: 'dithering',
     name: 'Dithering',
+
+    defaultParams: {
+        pattern: 'F-S',
+        colorMode: 'tritone',
+        shadows: '#000000',
+        midtones: '#ff4500',
+        highlights: '#ffffff',
+        imagePreprocessing: false,
+        preBlur: 0.5,
+        preGrain: 0.1,
+        preGamma: 1.0,
+        preBlackPoint: 0,
+        preWhitePoint: 255,
+        showEffect: true,
+        pixelSize: 2,
+        useColorMode: false,
+        threshold: 128,
+        removeBgV2: false,
+    },
+
+    controls: [
+        { key: 'showEffect', label: 'Enable Effect', type: 'checkbox' },
+        {
+            key: 'pattern',
+            label: 'Pattern',
+            type: 'segmented',
+            options: [
+                { value: 'F-S', label: 'F-S' },
+                { value: 'Bayer', label: 'Bayer' },
+                { value: 'Random', label: 'Random' },
+            ],
+        },
+        { key: 'threshold', label: 'Threshold', type: 'slider', min: 0, max: 255, step: 1 },
+        { key: 'pixelSize', label: 'Pixel Size', type: 'slider', min: 1, max: 20, step: 1 },
+        { key: 'useColorMode', label: 'Use Original Colors', type: 'checkbox' },
+        {
+            key: 'colorMode',
+            label: 'Palette Mode',
+            type: 'segmented',
+            options: [
+                { value: 'monochrome', label: 'Mono' },
+                { value: 'duotone', label: 'Duo' },
+                { value: 'tritone', label: 'Tri' },
+            ],
+            showWhen: (params) => !params.useColorMode,
+        },
+        {
+            key: 'removeBgV2',
+            label: 'Remove BG v2',
+            type: 'checkbox',
+            showWhen: (params) => !params.useColorMode && params.colorMode === 'monochrome',
+        },
+        {
+            key: 'shadows',
+            label: 'Shadows',
+            type: 'color',
+            showWhen: (params) => !params.useColorMode,
+        },
+        {
+            key: 'midtones',
+            label: 'Midtones',
+            type: 'color',
+            showWhen: (params) => !params.useColorMode && params.colorMode === 'tritone',
+        },
+        {
+            key: 'highlights',
+            label: 'Highlights',
+            type: 'color',
+            showWhen: (params) => !params.useColorMode,
+        },
+        { key: 'imagePreprocessing', label: 'Image Preprocessing', type: 'checkbox' },
+        {
+            key: 'preBlur',
+            label: 'Pre-Blur',
+            type: 'slider',
+            min: 0,
+            max: 5,
+            step: 0.1,
+            showWhen: (params) => !!params.imagePreprocessing,
+        },
+        {
+            key: 'preGrain',
+            label: 'Pre-Grain',
+            type: 'slider',
+            min: 0,
+            max: 1,
+            step: 0.01,
+            showWhen: (params) => !!params.imagePreprocessing,
+        },
+        {
+            key: 'preGamma',
+            label: 'Gamma Factor',
+            type: 'slider',
+            min: 0.1,
+            max: 4,
+            step: 0.01,
+            showWhen: (params) => !!params.imagePreprocessing,
+        },
+        {
+            key: 'preBlackPoint',
+            label: 'Black Point',
+            type: 'slider',
+            min: 0,
+            max: 255,
+            step: 1,
+            showWhen: (params) => !!params.imagePreprocessing,
+        },
+        {
+            key: 'preWhitePoint',
+            label: 'White Point',
+            type: 'slider',
+            min: 0,
+            max: 255,
+            step: 1,
+            showWhen: (params) => !!params.imagePreprocessing,
+        },
+    ],
+
+    coerceParams(params: EffectParams | undefined): EffectParams {
+        const merged: EffectParams = { ...dithering.defaultParams, ...(params || {}) };
+
+        const rawHasRemoveBgV2 = params ? Object.prototype.hasOwnProperty.call(params, 'removeBgV2') : false;
+        const rawHasTransparentBg = params ? Object.prototype.hasOwnProperty.call(params, 'transparentBg') : false;
+        const removeBgInput = rawHasRemoveBgV2
+            ? merged.removeBgV2
+            : (rawHasTransparentBg ? merged.transparentBg : merged.removeBgV2);
+        merged.removeBgV2 = coerceBooleanFlag(removeBgInput, false);
+        merged.transparentBg = merged.removeBgV2; // legacy sync
+        return merged;
+    },
+
     fragmentShader: `
         precision highp float;
         uniform sampler2D tInput;
@@ -35,7 +194,7 @@ export const dithering: EffectProvider = {
         uniform float pixelSize;
         uniform int useColorMode;
         uniform float thresholdUniform;
-        uniform int transparentBg;
+        uniform int removeBgV2;
         uniform float seed;
 
         varying vec2 vUv;
@@ -140,7 +299,7 @@ export const dithering: EffectProvider = {
                 if (colorMode == 0) {
                     float dithered = step(ditherThreshold, lum);
                     finalColor = mix(shadowsC, highlightsC, dithered);
-                    if (transparentBg == 1) {
+                    if (removeBgV2 == 1) {
                         alpha = dithered;
                     }
                 } else if (colorMode == 1) {
@@ -163,156 +322,38 @@ export const dithering: EffectProvider = {
         resolution: (_, ctx) => [ctx.width, ctx.height],
         seed: () => Math.random() * 100,
         algorithm: (params) => {
-            // Map both 'algorithm' and legacy 'pattern' param
-            if (typeof params.pattern === 'string') {
+            const p = dithering.coerceParams(params);
+            if (typeof p.pattern === 'string') {
                 const PATTERNS: Record<string, number> = { 'F-S': 0, 'Bayer': 1, 'Random': 2 };
-                return PATTERNS[params.pattern] ?? 0;
+                return PATTERNS[p.pattern] ?? 0;
             }
-            if (typeof params.algorithm === 'string') {
+            if (typeof p.algorithm === 'string') {
                 const ALGOS: Record<string, number> = { 'atkinson': 0, 'bayer': 1, 'floyd_steinberg': 2 };
-                return ALGOS[params.algorithm] ?? 0;
+                return ALGOS[p.algorithm] ?? 0;
             }
-            return params.algorithm ?? 0;
+            return Number(p.algorithm) ?? 0;
         },
         colorMode: (params) => {
-            if (typeof params.colorMode === 'string') {
+            const p = dithering.coerceParams(params);
+            if (typeof p.colorMode === 'string') {
                 const MODES: Record<string, number> = { 'monochrome': 0, 'duotone': 1, 'tritone': 2 };
-                return MODES[params.colorMode] ?? 0;
+                return MODES[p.colorMode] ?? 0;
             }
-            return params.colorMode ?? 0;
+            return Number(p.colorMode) ?? 0;
         },
         shadowsC: (params) => typeof params.shadows === 'string' ? hexToVec3(params.shadows) : [0, 0, 0],
         midtonesC: (params) => typeof params.midtones === 'string' ? hexToVec3(params.midtones) : [0.5, 0.5, 0.5],
         highlightsC: (params) => typeof params.highlights === 'string' ? hexToVec3(params.highlights) : [1, 1, 1],
         imagePreprocessing: (params) => params.imagePreprocessing ? 1 : 0,
-        preBlur: (params) => params.preBlur ?? 0.0,
-        preGrain: (params) => params.preGrain ?? 0.0,
-        preGamma: (params) => params.preGamma ?? 1.0,
-        preBlackPoint: (params) => (params.preBlackPoint ?? 0) / 255.0,
-        preWhitePoint: (params) => (params.preWhitePoint ?? 255) / 255.0,
+        preBlur: (params) => Number(params.preBlur) ?? 0.0,
+        preGrain: (params) => Number(params.preGrain) ?? 0.0,
+        preGamma: (params) => Number(params.preGamma) ?? 1.0,
+        preBlackPoint: (params) => (Number(params.preBlackPoint) ?? 0) / 255.0,
+        preWhitePoint: (params) => (Number(params.preWhitePoint) ?? 255) / 255.0,
         showEffect: (params) => params.showEffect ? 1 : 0,
-        pixelSize: (params) => params.pixelSize ?? 1.0,
+        pixelSize: (params) => Number(params.pixelSize) ?? 1.0,
         useColorMode: (params) => params.useColorMode ? 1 : 0,
-        thresholdUniform: (params) => (params.threshold ?? 128) / 255.0,
-        transparentBg: (params) => params.transparentBg ? 1 : 0,
-    }
-};
-
-// ── ASCII Art ────────────────────────────────────────────────────────────
-export const ascii: EffectProvider = {
-    id: 'ascii',
-    name: 'ASCII Art',
-    fragmentShader: `
-        precision highp float;
-        uniform sampler2D tInput;
-        uniform vec2 resolution;
-        uniform float scale;
-        uniform float asciiGamma;
-        uniform float asciiPhase;
-        uniform int colorMode;
-        uniform int background;
-        uniform vec3 bgColor;
-        uniform vec3 textColor;
-        uniform int invertOrder;
-
-        uniform int glyphs[32];
-        uniform int numGlyphs;
-
-        varying vec2 vUv;
-
-        float luminance(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
-
-        float character(int n, vec2 p) {
-            p = floor(p * vec2(4.0, -4.0) + 2.5);
-            if (clamp(p.x, 0.0, 4.0) == p.x && clamp(p.y, 0.0, 4.0) == p.y) {
-                int bit = int(floor(p.x + 0.5) + 5.0 * floor(p.y + 0.5));
-                float v = mod(floor(float(n) / pow(2.0, float(24 - bit))), 2.0);
-                return v;
-            }
-            return 0.0;
-        }
-
-        int getGlyph(float lum) {
-            if (invertOrder == 1) lum = 1.0 - lum;
-
-            float fIndex = lum * float(numGlyphs - 1) + asciiPhase;
-            int index = int(mod(floor(fIndex + 0.5), float(numGlyphs)));
-            
-            int glyphVal = 0;
-            for (int i = 0; i < 32; i++) {
-                if (i == index) glyphVal = glyphs[i];
-                if (i >= numGlyphs) break;
-            }
-            return glyphVal;
-        }
-
-        void main() {
-            float charScale = mix(4.0, 48.0, scale / 100.0);
-            vec2 charSize = vec2(charScale, charScale * 1.5);
-            
-            vec2 numChars = floor(resolution / charSize);
-            vec2 charCoord = floor(vUv * numChars);
-            vec2 localPos = fract(vUv * numChars);
-
-            vec2 sampleUV = (charCoord + 0.5) / numChars;
-            vec4 origColor = texture2D(tInput, sampleUV);
-
-            float g = mix(0.1, 4.0, asciiGamma / 100.0);
-            float lum = pow(max(luminance(origColor.rgb), 0.0), g);
-
-            float draw = character(getGlyph(lum), localPos - 0.5);
-            
-            vec3 col;
-            if (colorMode == 0) {
-                col = origColor.rgb * draw;
-            } else if (colorMode == 1) {
-                col = vec3(lum) * draw;
-            } else {
-                col = textColor * draw;
-            }
-            
-            vec3 backCol = vec3(0.0);
-            if (background == 0) {
-                backCol = texture2D(tInput, vUv).rgb * (1.0 - draw);
-            } else {
-                backCol = bgColor * (1.0 - draw);
-            }
-            
-            vec3 finalColor = col + backCol;
-
-            gl_FragColor = vec4(finalColor, origColor.a);
-        }
-    `,
-    uniforms: {
-        tInput: (_, ctx) => ctx.inputTex,
-        resolution: (_, ctx) => [ctx.width, ctx.height],
-        scale: (params) => params.scale ?? 50.0,
-        asciiGamma: (params) => params.asciiGamma ?? 50.0,
-        asciiPhase: (params) => params.asciiPhase ?? 0.0,
-        colorMode: (params) => {
-            if (typeof params.colorMode === 'string') {
-                const MODES: Record<string, number> = { 'Texture': 0, 'Grayscale': 1, 'Monochrome': 2 };
-                return MODES[params.colorMode] ?? 0;
-            }
-            return params.colorMode ?? 0;
-        },
-        background: (params) => params.background ? 1 : 0,
-        bgColor: (params) => typeof params.bgColor === 'string' ? hexToVec3(params.bgColor) : [0, 0, 0],
-        textColor: (params) => typeof params.textColor === 'string' ? hexToVec3(params.textColor) : [1, 1, 1],
-        invertOrder: (params) => params.invertOrder ? 1 : 0,
-        glyphs: (params) => {
-            const chars = (params.characters as string) || ' ';
-            const glyphs = new Array(32).fill(0);
-            let numGlyphs = Math.min(chars.length, 32);
-            if (numGlyphs === 0) { glyphs[0] = 0; numGlyphs = 1; }
-            for (let i = 0; i < numGlyphs; i++) {
-                glyphs[i] = ASCII_FONT[chars[i]] ?? 15243268;
-            }
-            return glyphs;
-        },
-        numGlyphs: (params) => {
-            const chars = (params.characters as string) || ' ';
-            return Math.max(1, Math.min(chars.length, 32));
-        },
+        thresholdUniform: (params) => (Number(params.threshold) ?? 128) / 255.0,
+        removeBgV2: (params) => dithering.coerceParams(params).removeBgV2 ? 1 : 0,
     }
 };

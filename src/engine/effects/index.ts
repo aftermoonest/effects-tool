@@ -1,33 +1,38 @@
-// Barrel file — importing this module registers all built-in effects.
 import { effectRegistry } from '../effectRegistry';
 
-// Color Adjustments
-import { brightnessContrast, blackWhite, levels, curves, selectiveColor } from './colorAdjustments';
+import { brightnessContrast } from './brightnessContrast';
+import { blackWhite } from './blackWhite';
+import { levels } from './levels';
+import { curves } from './curves';
+import { selectiveColor } from './selectiveColor';
+import { unsharpMask } from './unsharpMask';
+import { addNoise } from './addNoise';
+import { ripple } from './ripple';
+import { minimum } from './minimum';
+import { findEdges } from './findEdges';
+import { ascii } from './ascii';
+import { dithering } from './dithering';
+import { stippling } from './stippling';
+import { cellularAutomata } from './cellularAutomata';
 
-// Filters
-import { unsharpMask, addNoise, ripple, minimum, findEdges } from './filters';
+export function registerAllEffects() {
+    effectRegistry.register(brightnessContrast);
+    effectRegistry.register(blackWhite);
+    effectRegistry.register(levels);
+    effectRegistry.register(curves);
+    effectRegistry.register(selectiveColor);
 
-// Stylize
-import { dithering, ascii } from './stylize';
+    effectRegistry.register(unsharpMask);
+    effectRegistry.register(addNoise);
+    effectRegistry.register(ripple);
+    effectRegistry.register(minimum);
+    effectRegistry.register(findEdges);
 
-// Register all built-in effects
-const allEffects = [
-    brightnessContrast,
-    blackWhite,
-    levels,
-    curves,
-    selectiveColor,
-    unsharpMask,
-    addNoise,
-    ripple,
-    minimum,
-    findEdges,
-    dithering,
-    ascii,
-];
-
-for (const effect of allEffects) {
-    effectRegistry.register(effect);
+    effectRegistry.register(ascii);
+    effectRegistry.register(dithering);
+    effectRegistry.register(stippling);
+    effectRegistry.register(cellularAutomata);
 }
 
-export { allEffects };
+// Automatically register all effects when this module is imported.
+registerAllEffects();

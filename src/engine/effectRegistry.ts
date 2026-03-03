@@ -1,22 +1,22 @@
-import type { EffectProvider } from './types';
+import type { EffectPlugin } from './types';
 
 class EffectRegistry {
-    private providers: Map<string, EffectProvider> = new Map();
+    private plugins: Map<string, EffectPlugin> = new Map();
 
-    public register(provider: EffectProvider) {
-        if (this.providers.has(provider.id)) {
-            console.warn(`[EffectRegistry] Overwriting existing effect provider for id: ${provider.id}`);
+    public register(plugin: EffectPlugin) {
+        if (this.plugins.has(plugin.id)) {
+            console.warn(`[EffectRegistry] Overwriting existing effect plugin for id: ${plugin.id}`);
         }
-        this.providers.set(provider.id, provider);
-        console.log(`[EffectRegistry] Registered effect: ${provider.id} (${provider.name})`);
+        this.plugins.set(plugin.id, plugin);
+        console.log(`[EffectRegistry] Registered effect plugin: ${plugin.id} (${plugin.name})`);
     }
 
-    public get(id: string): EffectProvider | undefined {
-        return this.providers.get(id);
+    public get(id: string): EffectPlugin | undefined {
+        return this.plugins.get(id);
     }
 
-    public getAll(): EffectProvider[] {
-        return Array.from(this.providers.values());
+    public getAll(): EffectPlugin[] {
+        return Array.from(this.plugins.values());
     }
 }
 

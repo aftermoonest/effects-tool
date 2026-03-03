@@ -2,6 +2,8 @@ import { useEditorStore } from '@/store/editorStore';
 import type { BlendMode } from '@/store/editorStore';
 import { AlignLeft, AlignCenter, AlignRight, Maximize, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Slider } from '@/components/ui/slider';
+import { NumberInput } from '@/components/ui/number-input';
 
 const BLEND_MODE_OPTIONS: { value: BlendMode; label: string }[] = [
     { value: 'normal', label: 'Normal' },
@@ -22,8 +24,10 @@ export const PropertiesPanel = () => {
     const setLayerTransform = useEditorStore(s => s.setLayerTransform);
     const setLayerOpacity = useEditorStore(s => s.setLayerOpacity);
     const setLayerBlendMode = useEditorStore(s => s.setLayerBlendMode);
+    const setSolidLayerColor = useEditorStore(s => s.setSolidLayerColor);
     const toggleLayerMask = useEditorStore(s => s.toggleLayerMask);
     const toggleLayerInvertMask = useEditorStore(s => s.toggleLayerInvertMask);
+    const setLayerMaskThreshold = useEditorStore(s => s.setLayerMaskThreshold);
     const canvasWidth = useEditorStore(s => s.canvasWidth);
     const canvasHeight = useEditorStore(s => s.canvasHeight);
 
@@ -39,6 +43,7 @@ export const PropertiesPanel = () => {
     }
 
     const isImage = activeLayer.kind === 'image';
+    const isSolid = activeLayer.kind === 'solid';
     const { x, y, width, height } = activeLayer;
 
     const handleAlign = (type: string) => {
@@ -96,13 +101,13 @@ export const PropertiesPanel = () => {
                         <label className="text-[10px] text-muted-foreground uppercase font-bold">Opacity</label>
                         <span className="text-[10px] tabular-nums text-foreground font-mono">{Math.round(activeLayer.opacity * 100)}%</span>
                     </div>
-                    <input
-                        type="range"
+                    <Slider
+                        value={[activeLayer.opacity * 100]}
                         min={0}
                         max={100}
-                        value={Math.round(activeLayer.opacity * 100)}
-                        onChange={(e) => setLayerOpacity(activeLayer.id, parseInt(e.target.value) / 100)}
-                        className="w-full h-1.5 bg-secondary rounded-full appearance-none cursor-pointer accent-primary"
+                        step={1}
+                        onValueChange={(v) => setLayerOpacity(activeLayer.id, v[0] / 100)}
+                        aria-label="Layer opacity"
                     />
                 </div>
 
@@ -112,7 +117,8 @@ export const PropertiesPanel = () => {
                     <select
                         value={activeLayer.blendMode}
                         onChange={(e) => setLayerBlendMode(activeLayer.id, e.target.value as BlendMode)}
-                        className="flex-1 bg-secondary/50 border border-border rounded px-2 py-1.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary cursor-pointer appearance-none"
+                        aria-label="Layer blend mode"
+                        className="flex-1 bg-secondary/50 border border-border rounded px-2 py-1 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary focus:border-primary cursor-pointer appearance-none"
                     >
                         {BLEND_MODE_OPTIONS.map(opt => (
                             <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -120,6 +126,24 @@ export const PropertiesPanel = () => {
                     </select>
                 </div>
             </div>
+
+            {/* ── Fill (solid layers only) ── */}
+            {isSolid && (
+                <div className="space-y-2 border-t border-border pt-4">
+                    <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-1">Fill</h3>
+                    <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] text-muted-foreground font-mono uppercase">
+                            {activeLayer.solidColor ?? '#000000'}
+                        </span>
+                        <input
+                            type="color"
+                            value={activeLayer.solidColor ?? '#000000'}
+                            onChange={(e) => setSolidLayerColor(activeLayer.id, e.target.value)}
+                            className="w-10 h-8 p-0 border border-border rounded cursor-pointer bg-transparent"
+                        />
+                    </div>
+                </div>
+            )}
 
             {/* ── Mask Controls (image layers only) ── */}
             {isImage && (
@@ -131,7 +155,8 @@ export const PropertiesPanel = () => {
                             type="checkbox"
                             checked={!!activeLayer.isMask}
                             onChange={() => toggleLayerMask(activeLayer.id)}
-                            className="w-3.5 h-3.5 rounded border-border accent-purple-500 cursor-pointer"
+                            aria-label="Use as mask"
+                            className="w-3 h-3 rounded border-border accent-primary cursor-pointer"
                         />
                         <span className="text-xs uppercase font-bold tracking-wider group-hover:text-foreground text-muted-foreground transition-colors">
                             Use as Mask
@@ -139,17 +164,37 @@ export const PropertiesPanel = () => {
                     </label>
 
                     {activeLayer.isMask && (
-                        <label className="flex items-center gap-2 cursor-pointer group ml-5">
-                            <input
-                                type="checkbox"
-                                checked={!!activeLayer.invertMask}
-                                onChange={() => toggleLayerInvertMask(activeLayer.id)}
-                                className="w-3.5 h-3.5 rounded border-border accent-purple-500 cursor-pointer"
-                            />
-                            <span className="text-xs uppercase font-bold tracking-wider group-hover:text-foreground text-muted-foreground transition-colors">
-                                Invert Mask
-                            </span>
-                        </label>
+                        <div className="space-y-1.5 ml-5">
+                            <label className="flex items-center gap-2 cursor-pointer group">
+                                <input
+                                    type="checkbox"
+                                    checked={!!activeLayer.invertMask}
+                                    onChange={() => toggleLayerInvertMask(activeLayer.id)}
+                                    aria-label="Invert mask"
+                                    className="w-3 h-3 rounded border-border accent-primary cursor-pointer"
+                                />
+                                <span className="text-xs uppercase font-bold tracking-wider group-hover:text-foreground text-muted-foreground transition-colors">
+                                    Invert Mask
+                                </span>
+                            </label>
+
+                            <div className="space-y-1 pt-1">
+                                <div className="flex items-center justify-between">
+                                    <label className="text-[10px] text-muted-foreground uppercase font-bold">Threshold</label>
+                                    <span className="text-[10px] tabular-nums text-foreground font-mono">
+                                        {Math.round((activeLayer.maskThreshold ?? 0.5) * 100)}%
+                                    </span>
+                                </div>
+                                <Slider
+                                    value={[Math.round((activeLayer.maskThreshold ?? 0.5) * 100)]}
+                                    min={0}
+                                    max={100}
+                                    step={1}
+                                    onValueChange={(v) => setLayerMaskThreshold(activeLayer.id, v[0] / 100)}
+                                    aria-label="Mask threshold"
+                                />
+                            </div>
+                        </div>
                     )}
                 </div>
             )}
@@ -162,42 +207,32 @@ export const PropertiesPanel = () => {
                     </div>
 
                     <div className="grid grid-cols-2 gap-2">
-                        <div className="flex items-center bg-secondary/50 border border-border rounded px-2 focus-within:ring-1 focus-within:ring-primary focus-within:border-primary">
-                            <label className="text-[10px] text-muted-foreground uppercase font-bold w-3">X</label>
-                            <input
-                                type="number"
-                                value={Math.round(x)}
-                                onChange={(e) => setLayerTransform(activeLayer.id, { x: parseInt(e.target.value) || 0, y, width, height })}
-                                className="w-full bg-transparent border-none py-1.5 text-foreground text-xs focus:outline-none tabular-nums text-right"
-                            />
-                        </div>
-                        <div className="flex items-center bg-secondary/50 border border-border rounded px-2 focus-within:ring-1 focus-within:ring-primary focus-within:border-primary">
-                            <label className="text-[10px] text-muted-foreground uppercase font-bold w-3">Y</label>
-                            <input
-                                type="number"
-                                value={Math.round(y)}
-                                onChange={(e) => setLayerTransform(activeLayer.id, { x, y: parseInt(e.target.value) || 0, width, height })}
-                                className="w-full bg-transparent border-none py-1.5 text-foreground text-xs focus:outline-none tabular-nums text-right"
-                            />
-                        </div>
-                        <div className="flex items-center bg-secondary/50 border border-border rounded px-2 focus-within:ring-1 focus-within:ring-primary focus-within:border-primary">
-                            <label className="text-[10px] text-muted-foreground uppercase font-bold w-3">W</label>
-                            <input
-                                type="number"
-                                value={Math.round(width)}
-                                onChange={(e) => setLayerTransform(activeLayer.id, { x, y, width: parseInt(e.target.value) || 0, height })}
-                                className="w-full bg-transparent border-none py-1.5 text-foreground text-xs focus:outline-none tabular-nums text-right"
-                            />
-                        </div>
-                        <div className="flex items-center bg-secondary/50 border border-border rounded px-2 focus-within:ring-1 focus-within:ring-primary focus-within:border-primary">
-                            <label className="text-[10px] text-muted-foreground uppercase font-bold w-3">H</label>
-                            <input
-                                type="number"
-                                value={Math.round(height)}
-                                onChange={(e) => setLayerTransform(activeLayer.id, { x, y, width, height: parseInt(e.target.value) || 0 })}
-                                className="w-full bg-transparent border-none py-1.5 text-foreground text-xs focus:outline-none tabular-nums text-right"
-                            />
-                        </div>
+                        <NumberInput
+                            label="X"
+                            value={Math.round(x)}
+                            onChange={(val) => setLayerTransform(activeLayer.id, { x: val, y, width, height })}
+                            step={1}
+                        />
+                        <NumberInput
+                            label="Y"
+                            value={Math.round(y)}
+                            onChange={(val) => setLayerTransform(activeLayer.id, { x, y: val, width, height })}
+                            step={1}
+                        />
+                        <NumberInput
+                            label="W"
+                            value={Math.round(width)}
+                            onChange={(val) => setLayerTransform(activeLayer.id, { x, y, width: val, height })}
+                            step={1}
+                            min={0}
+                        />
+                        <NumberInput
+                            label="H"
+                            value={Math.round(height)}
+                            onChange={(val) => setLayerTransform(activeLayer.id, { x, y, width, height: val })}
+                            step={1}
+                            min={0}
+                        />
                     </div>
                 </div>
             )}

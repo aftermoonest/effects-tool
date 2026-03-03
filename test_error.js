@@ -17,7 +17,7 @@ import puppeteer from 'puppeteer';
         const store = window.__ZUSTAND_STORE__ || null;
 
         // Fallback: click add image button if it exists
-        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Add Layer'));
+        const btn = document.querySelector('button[aria-label="Add image layer"]');
         if (btn) btn.click();
 
         await new Promise(r => setTimeout(r, 500));

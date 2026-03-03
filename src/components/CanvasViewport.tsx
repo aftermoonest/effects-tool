@@ -1,6 +1,7 @@
 import { useEditorStore } from '@/store/editorStore';
 import type { Layer } from '@/store/editorStore';
 import { Compositor } from '@/engine/Compositor';
+import { importLayerImageFromFile, LAYER_UPLOAD_ACCEPT } from '@/lib/importLayerFile';
 import { Upload, Plus, Minus, Maximize, ScanLine, Undo2, Redo2 } from 'lucide-react';
 import Moveable from 'react-moveable';
 import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react';
@@ -45,6 +46,21 @@ const getVisibleImageLayers = (layers: Record<string, Layer>, layerOrder: string
     return ordered.reverse();
 };
 
+const hasVisibleSolidLayer = (layers: Record<string, Layer>, layerOrder: string[]): boolean => {
+    const walk = (ids: string[]): boolean => {
+        for (const id of ids) {
+            const layer = layers[id];
+            if (!layer || !layer.visible) continue;
+            if (layer.kind === 'solid') return true;
+            if (layer.kind === 'group' && layer.children.length > 0 && walk(layer.children)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return walk(layerOrder);
+};
+
 export const CanvasViewport = () => {
     const layers = useEditorStore((s) => s.layers);
     const layerOrder = useEditorStore((s) => s.layerOrder);
@@ -61,6 +77,7 @@ export const CanvasViewport = () => {
     const resetZoom = useEditorStore((s) => s.resetZoom);
     const activeLayerId = useEditorStore((s) => s.activeLayerId);
     const setActiveLayer = useEditorStore((s) => s.setActiveLayer);
+    const asciiImportFontId = useEditorStore((s) => s.asciiImportFontId);
 
     // Undo/Redo Transform State
     const undoTransform = useEditorStore((s) => s.undoTransform);
@@ -89,8 +106,8 @@ export const CanvasViewport = () => {
     const resizeStartRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
 
     const visibleImageLayers = useMemo(() => getVisibleImageLayers(layers, layerOrder), [layers, layerOrder]);
-
-    const hasImage = visibleImageLayers.length > 0;
+    const hasSolidLayer = useMemo(() => hasVisibleSolidLayer(layers, layerOrder), [layers, layerOrder]);
+    const hasImage = visibleImageLayers.length > 0 || hasSolidLayer;
 
     const activeImageLayer = useMemo(() => {
         if (!activeLayerId) return null;
@@ -271,17 +288,21 @@ export const CanvasViewport = () => {
         };
     }, []);
 
-    const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
 
-        const url = URL.createObjectURL(file);
-        const img = new Image();
-        img.onload = () => {
-            addImageLayer(img, file.name.replace(/\.[^/.]+$/, ''));
-            URL.revokeObjectURL(url);
-        };
-        img.src = url;
+        try {
+            const { image, name, asciiTextSource } = await importLayerImageFromFile(file, { asciiFontId: asciiImportFontId });
+            addImageLayer(image, name, {
+                asciiTextSource,
+                asciiTextFontId: asciiTextSource ? asciiImportFontId : undefined,
+            });
+        } catch (error) {
+            console.error('[Upload] Failed to import file:', error);
+        } finally {
+            e.target.value = '';
+        }
     };
 
     const canvasScreenRect = useMemo<BoxRect>(() => {
@@ -645,7 +666,7 @@ export const CanvasViewport = () => {
                             type="file"
                             ref={fileInputRef}
                             className="hidden"
-                            accept="image/png, image/jpeg, image/webp"
+                            accept={LAYER_UPLOAD_ACCEPT}
                             onChange={handleFileUpload}
                         />
                         <div className="text-center space-y-4 uppercase tracking-wider">

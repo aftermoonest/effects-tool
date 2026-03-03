@@ -42,6 +42,16 @@ void main() {
 }
 `;
 
+// Vertex shader for positioned solid-color quad blits.
+export const positionedColorVertexShader = `
+precision mediump float;
+attribute vec2 position;
+
+void main() {
+  gl_Position = vec4(position, 0, 1);
+}
+`;
+
 // A simple passthrough fragment shader, used for simply drawing a texture to the screen
 export const passthroughFragmentShader = `
 precision mediump float;
@@ -50,6 +60,16 @@ varying vec2 vUv;
 
 void main() {
   gl_FragColor = texture2D(tInput, vUv);
+}
+`;
+
+// Fragment shader for rendering a constant color.
+export const solidColorFragmentShader = `
+precision mediump float;
+uniform vec4 fillColor;
+
+void main() {
+  gl_FragColor = fillColor;
 }
 `;
 
@@ -103,6 +123,7 @@ vec3 blendColorBurn(vec3 base, vec3 blend) {
 void main() {
     vec4 orig = texture2D(tOriginal, vUv);
     vec4 eff = texture2D(tEffect, vUv);
+    float effectAlpha = clamp(eff.a * opacity, 0.0, 1.0);
     
     vec3 blended;
   if (blendMode == 0) blended = blendNormal(orig.rgb, eff.rgb);
@@ -117,9 +138,10 @@ void main() {
   else if (blendMode == 9) blended = blendColorBurn(orig.rgb, eff.rgb);
   else blended = eff.rgb;
     
-    vec3 finalColor = mix(orig.rgb, blended, opacity);
+    vec3 finalColor = mix(orig.rgb, blended, effectAlpha);
+    float finalAlpha = effectAlpha + orig.a * (1.0 - effectAlpha);
 
-  gl_FragColor = vec4(finalColor, orig.a);
+  gl_FragColor = vec4(finalColor, finalAlpha);
 }
 `;
 
@@ -196,30 +218,34 @@ void main() {
 `;
 
 // ----------------------------------------------------------------------
-// Mask Application — Uses mask's luminance * alpha to clip composite
+// Mask Application — Mixes base and masked segment by mask alpha
 // ----------------------------------------------------------------------
 export const applyMaskShader = `
 precision mediump float;
-uniform sampler2D tInput;
+uniform sampler2D tBase;
+uniform sampler2D tSegment;
 uniform sampler2D tMask;
 uniform int invertMask;
+uniform float maskThreshold;
 varying vec2 vUv;
 
 void main() {
-    vec4 comp = texture2D(tInput, vUv);
+    vec4 base = texture2D(tBase, vUv);
+    vec4 segment = texture2D(tSegment, vUv);
     vec4 mask = texture2D(tMask, vUv);
     
-    // Use luminance weighted by alpha as the mask value
-    // This works for both:
-    // - Opaque images (JPEG): luminance drives the mask (white=visible, black=masked)
-    // - Transparent images (PNG): alpha channel contributes naturally
+    // Prefer alpha masking. For fully opaque mask images (e.g. JPEG),
+    // fall back to a luminance threshold to avoid global semi-opacity fades.
     float lum = dot(mask.rgb, vec3(0.299, 0.587, 0.114));
-    float maskValue = lum * mask.a;
+    float alphaMask = mask.a;
+    float luminanceMask = step(maskThreshold, lum);
+    float useLuminance = step(0.999, alphaMask);
+    float maskValue = mix(alphaMask, luminanceMask, useLuminance);
     
     if (invertMask == 1) {
         maskValue = 1.0 - maskValue;
     }
     
-    gl_FragColor = vec4(comp.rgb, comp.a * maskValue);
+    gl_FragColor = mix(base, segment, clamp(maskValue, 0.0, 1.0));
 }
 `;
