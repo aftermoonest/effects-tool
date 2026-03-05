@@ -2,8 +2,9 @@ import { useEditorStore } from '@/store/editorStore';
 import type { BlendMode } from '@/store/editorStore';
 import { AlignLeft, AlignCenter, AlignRight, Maximize, Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Slider } from '@/components/ui/slider';
+import { NumericSliderControl } from '@/components/ui/numeric-slider-control';
 import { NumberInput } from '@/components/ui/number-input';
+import { Checkbox } from '@/components/ui/checkbox';
 
 const BLEND_MODE_OPTIONS: { value: BlendMode; label: string }[] = [
     { value: 'normal', label: 'Normal' },
@@ -92,24 +93,18 @@ export const PropertiesPanel = () => {
     return (
         <div className="p-4 space-y-5">
             {/* ── Opacity & Blend Mode (all layer types) ── */}
-            <div className="space-y-2">
+            <div className="space-y-3">
                 <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-1">Appearance</h3>
 
-                {/* Opacity */}
-                <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                        <label className="text-[10px] text-muted-foreground uppercase font-bold">Opacity</label>
-                        <span className="text-[10px] tabular-nums text-foreground font-mono">{Math.round(activeLayer.opacity * 100)}%</span>
-                    </div>
-                    <Slider
-                        value={[activeLayer.opacity * 100]}
-                        min={0}
-                        max={100}
-                        step={1}
-                        onValueChange={(v) => setLayerOpacity(activeLayer.id, v[0] / 100)}
-                        aria-label="Layer opacity"
-                    />
-                </div>
+                <NumericSliderControl
+                    label="Opacity"
+                    value={activeLayer.opacity * 100}
+                    min={0}
+                    max={100}
+                    step={1}
+                    unit="%"
+                    onChange={(v) => setLayerOpacity(activeLayer.id, v / 100)}
+                />
 
                 {/* Blend Mode */}
                 <div className="flex items-center gap-2">
@@ -150,48 +145,29 @@ export const PropertiesPanel = () => {
                 <div className="space-y-2 border-t border-border pt-4">
                     <h3 className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-1">Mask</h3>
 
-                    <label className="flex items-center gap-2 cursor-pointer group">
-                        <input
-                            type="checkbox"
-                            checked={!!activeLayer.isMask}
-                            onChange={() => toggleLayerMask(activeLayer.id)}
-                            aria-label="Use as mask"
-                            className="w-3 h-3 rounded border-border accent-primary cursor-pointer"
-                        />
-                        <span className="text-xs uppercase font-bold tracking-wider group-hover:text-foreground text-muted-foreground transition-colors">
-                            Use as Mask
-                        </span>
-                    </label>
+                    <Checkbox
+                        checked={!!activeLayer.isMask}
+                        onChange={() => toggleLayerMask(activeLayer.id)}
+                        label="Use as Mask"
+                    />
 
                     {activeLayer.isMask && (
-                        <div className="space-y-1.5 ml-5">
-                            <label className="flex items-center gap-2 cursor-pointer group">
-                                <input
-                                    type="checkbox"
-                                    checked={!!activeLayer.invertMask}
-                                    onChange={() => toggleLayerInvertMask(activeLayer.id)}
-                                    aria-label="Invert mask"
-                                    className="w-3 h-3 rounded border-border accent-primary cursor-pointer"
-                                />
-                                <span className="text-xs uppercase font-bold tracking-wider group-hover:text-foreground text-muted-foreground transition-colors">
-                                    Invert Mask
-                                </span>
-                            </label>
+                        <div className="space-y-2 ml-2">
+                            <Checkbox
+                                checked={!!activeLayer.invertMask}
+                                onChange={() => toggleLayerInvertMask(activeLayer.id)}
+                                label="Invert Mask"
+                            />
 
-                            <div className="space-y-1 pt-1">
-                                <div className="flex items-center justify-between">
-                                    <label className="text-[10px] text-muted-foreground uppercase font-bold">Threshold</label>
-                                    <span className="text-[10px] tabular-nums text-foreground font-mono">
-                                        {Math.round((activeLayer.maskThreshold ?? 0.5) * 100)}%
-                                    </span>
-                                </div>
-                                <Slider
-                                    value={[Math.round((activeLayer.maskThreshold ?? 0.5) * 100)]}
+                            <div className="pt-1">
+                                <NumericSliderControl
+                                    label="Threshold"
+                                    value={Math.round((activeLayer.maskThreshold ?? 0.5) * 100)}
                                     min={0}
                                     max={100}
                                     step={1}
-                                    onValueChange={(v) => setLayerMaskThreshold(activeLayer.id, v[0] / 100)}
-                                    aria-label="Mask threshold"
+                                    unit="%"
+                                    onChange={(v) => setLayerMaskThreshold(activeLayer.id, v / 100)}
                                 />
                             </div>
                         </div>

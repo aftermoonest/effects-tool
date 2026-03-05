@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { NumericSliderControl } from '@/components/ui/numeric-slider-control';
+import { Checkbox } from '@/components/ui/checkbox';
 import { PropertiesPanel } from './PropertiesPanel';
 import {
     Settings2,
@@ -16,7 +17,9 @@ import {
     ChevronRight,
     RotateCcw,
     Copy,
-    Search
+    Search,
+    SlidersHorizontal,
+    Sparkles,
 } from 'lucide-react';
 import { useEditorStore } from '@/store/editorStore';
 import type { Effect, EffectParams } from '@/store/editorStore';
@@ -356,13 +359,11 @@ const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
 
         if (control.type === 'checkbox') {
             return (
-                <div key={control.key} className="flex justify-between items-center text-[10px] mt-2">
-                    <span className="text-muted-foreground font-mono uppercase truncate mr-2">{control.label}</span>
-                    <input
-                        type="checkbox"
+                <div key={control.key} className="mt-2">
+                    <Checkbox
                         checked={Boolean(value)}
-                        onChange={(event) => setParam(control.key, event.target.checked)}
-                        className="h-3 w-3 rounded border-border bg-secondary text-primary accent-primary"
+                        onChange={(checked) => setParam(control.key, checked)}
+                        label={control.label}
                     />
                 </div>
             );
@@ -579,6 +580,8 @@ export const EffectsPanel = () => {
 
     const [width, setWidth] = useState(288);
     const [isMinimized, setIsMinimized] = useState(false);
+    const [propertiesOpen, setPropertiesOpen] = useState(true);
+    const [effectsOpen, setEffectsOpen] = useState(true);
     const [effectSearch, setEffectSearch] = useState('');
     const [effectMenuOpen, setEffectMenuOpen] = useState(false);
     const isResizing = useRef(false);
@@ -686,36 +689,70 @@ export const EffectsPanel = () => {
 
             {!isMinimized ? (
                 <div className="flex-1 overflow-y-auto w-full relative">
-                    <PropertiesPanel />
+                    {/* ── Properties Accordion ── */}
+                    <button
+                        className="w-full flex items-center gap-2 px-4 py-2.5 bg-secondary/30 border-b border-border hover:bg-secondary/40 transition-colors cursor-pointer"
+                        onClick={() => setPropertiesOpen(!propertiesOpen)}
+                    >
+                        <ChevronDown
+                            size={12}
+                            className={`text-muted-foreground transition-transform duration-200 ${!propertiesOpen ? '-rotate-90' : ''}`}
+                        />
+                        <SlidersHorizontal size={12} className="text-primary/70" />
+                        <span className="font-bold text-[10px] uppercase tracking-widest text-muted-foreground">
+                            Properties
+                        </span>
+                    </button>
+                    {propertiesOpen && <PropertiesPanel />}
 
-                    <div className="bg-secondary/30 px-4 py-2 border-y border-border flex items-center gap-2">
-                        <h3 className="font-bold text-[10px] uppercase tracking-widest text-muted-foreground">Effects</h3>
-                    </div>
+                    {/* ── Effects Accordion ── */}
+                    <button
+                        className="w-full flex items-center gap-2 px-4 py-2.5 bg-secondary/30 border-b border-border hover:bg-secondary/40 transition-colors cursor-pointer"
+                        onClick={() => setEffectsOpen(!effectsOpen)}
+                    >
+                        <ChevronDown
+                            size={12}
+                            className={`text-muted-foreground transition-transform duration-200 ${!effectsOpen ? '-rotate-90' : ''}`}
+                        />
+                        <Sparkles size={12} className="text-primary/70" />
+                        <span className="font-bold text-[10px] uppercase tracking-widest text-muted-foreground">
+                            Effects
+                        </span>
+                        {activeLayer && activeLayer.effects.length > 0 && (
+                            <span className="ml-auto text-[9px] font-mono text-muted-foreground/60 tabular-nums">
+                                {activeLayer.effects.length}
+                            </span>
+                        )}
+                    </button>
 
-                    {!activeLayer ? (
-                        <div className="text-muted-foreground text-center py-8 font-mono uppercase tracking-wider border border-dashed border-border m-3 text-[10px]">
-                            <Settings2 size={16} className="mx-auto mb-2 text-muted-foreground/50" />
-                            Select a layer to edit effects.
-                        </div>
-                    ) : activeLayer.effects.length === 0 ? (
-                        <div className="text-muted-foreground text-center py-8 font-mono uppercase tracking-wider border border-dashed border-border m-3 text-[10px]">
-                            <Settings2 size={16} className="mx-auto mb-2 text-muted-foreground/50" />
-                            No effects on<br />
-                            <span className="text-foreground">{activeLayer.name}</span>
-                        </div>
-                    ) : (
-                        <div className="pb-16 flex flex-col">
-                            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-                                <SortableContext
-                                    items={activeLayer.effects.map((effect) => effect.id)}
-                                    strategy={verticalListSortingStrategy}
-                                >
-                                    {activeLayer.effects.map((effect) => (
-                                        <SortableEffectCard key={effect.id} effect={effect} layerId={activeLayer.id} />
-                                    ))}
-                                </SortableContext>
-                            </DndContext>
-                        </div>
+                    {effectsOpen && (
+                        <>
+                            {!activeLayer ? (
+                                <div className="text-muted-foreground text-center py-8 font-mono uppercase tracking-wider border border-dashed border-border m-3 text-[10px]">
+                                    <Settings2 size={16} className="mx-auto mb-2 text-muted-foreground/50" />
+                                    Select a layer to edit effects.
+                                </div>
+                            ) : activeLayer.effects.length === 0 ? (
+                                <div className="text-muted-foreground text-center py-8 font-mono uppercase tracking-wider border border-dashed border-border m-3 text-[10px]">
+                                    <Settings2 size={16} className="mx-auto mb-2 text-muted-foreground/50" />
+                                    No effects on<br />
+                                    <span className="text-foreground">{activeLayer.name}</span>
+                                </div>
+                            ) : (
+                                <div className="pb-16 flex flex-col">
+                                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                                        <SortableContext
+                                            items={activeLayer.effects.map((effect) => effect.id)}
+                                            strategy={verticalListSortingStrategy}
+                                        >
+                                            {activeLayer.effects.map((effect) => (
+                                                <SortableEffectCard key={effect.id} effect={effect} layerId={activeLayer.id} />
+                                            ))}
+                                        </SortableContext>
+                                    </DndContext>
+                                </div>
+                            )}
+                        </>
                     )}
                 </div>
             ) : (
