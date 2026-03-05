@@ -303,7 +303,7 @@ const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
     const updateEffectParam = useEditorStore((s) => s.updateEffectParam);
     const setEffectBlendMode = useEditorStore((s) => s.setEffectBlendMode);
     const setEffectOpacity = useEditorStore((s) => s.setEffectOpacity);
-    const [isExpanded, setIsExpanded] = useState(true);
+    const [isExpanded, setIsExpanded] = useState(false);
 
     const style = {
         transform: CSS.Transform.toString(transform),
