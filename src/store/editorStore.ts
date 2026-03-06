@@ -1,6 +1,7 @@
 import { create } from 'zustand';
-import { subscribeWithSelector } from 'zustand/middleware';
+import { subscribeWithSelector, persist } from 'zustand/middleware';
 import { DEFAULT_ASCII_IMPORT_FONT_ID, renderAsciiTextToImage } from '@/lib/importLayerFile';
+import { editorSessionStorage, type PersistedEditorState } from './sessionPersistence';
 
 // ----------------------------------------------------------------------
 // Types & Interfaces
@@ -81,6 +82,12 @@ export interface Layer {
     asciiTextFontId?: string;
 }
 
+export interface LayerUndoSnapshot {
+    layers: Record<string, Layer>;
+    layerOrder: string[];
+    activeLayerId: string | null;
+}
+
 export interface LayerTransformSnapshot {
     [layerId: string]: {
         x: number;
@@ -99,6 +106,7 @@ export interface EditorState {
     layers: Record<string, Layer>;
     layerOrder: string[];       // root-level ordering (top to bottom visually)
     activeLayerId: string | null;
+    activeEffectId: string | null;
 
     // Canvas dimensions and properties
     canvasWidth: number;
@@ -112,6 +120,10 @@ export interface EditorState {
     panX: number;
     panY: number;
 
+    // Layer undo (for destructive ops like delete)
+    layerUndoStack: LayerUndoSnapshot[];
+    layerRedoStack: LayerUndoSnapshot[];
+
     // Transform behavior
     transformUndoStack: LayerTransformSnapshot[];
     transformRedoStack: LayerTransformSnapshot[];
@@ -119,6 +131,12 @@ export interface EditorState {
 
     // Global trigger for WebGL re-renders
     renderTrigger: number;
+
+    // UI panel state
+    shortcutsPanelOpen: boolean;
+    effectDropdownRequested: boolean;
+    imageUploadRequested: boolean;
+    templatesPanelOpen: boolean;
 }
 
 export interface EditorActions {
@@ -172,6 +190,10 @@ export interface EditorActions {
     undoTransform: () => void;
     redoTransform: () => void;
 
+    // General undo (layer delete, etc.)
+    undoLayerAction: () => void;
+    redoLayerAction: () => void;
+
     // Viewport
     setZoom: (zoom: number) => void;
     setPan: (x: number, y: number) => void;
@@ -186,8 +208,23 @@ export interface EditorActions {
     // Templates
     applyTemplate: (bgImg: HTMLImageElement, overlayImg: HTMLImageElement, name: string) => void;
 
+    // Active effect
+    setActiveEffect: (effectId: string | null) => void;
+
     // Render
     triggerRender: () => void;
+
+    // UI panels
+    setShortcutsPanelOpen: (open: boolean) => void;
+    requestEffectDropdown: () => void;
+    clearEffectDropdownRequest: () => void;
+    requestImageUpload: () => void;
+    clearImageUploadRequest: () => void;
+    setTemplatesPanelOpen: (open: boolean) => void;
+
+    // Project persistence
+    loadProject: (state: Partial<EditorState>) => void;
+    resetEditor: () => void;
 }
 
 export type EditorStore = EditorState & EditorActions;
@@ -286,11 +323,12 @@ const applyLayerTransforms = (layers: Record<string, Layer>, snapshot: LayerTran
 // ----------------------------------------------------------------------
 
 export const useEditorStore = create<EditorStore>()(
-    subscribeWithSelector((set, get) => ({
+    subscribeWithSelector(persist((set, get) => ({
         // Initial State
         layers: {},
         layerOrder: [],
         activeLayerId: null,
+        activeEffectId: null,
         canvasWidth: DEFAULT_CANVAS_WIDTH,
         canvasHeight: DEFAULT_CANVAS_HEIGHT,
         canvasBgColor: '#000000',
@@ -299,10 +337,16 @@ export const useEditorStore = create<EditorStore>()(
         zoom: 1,
         panX: 0,
         panY: 0,
+        layerUndoStack: [],
+        layerRedoStack: [],
         transformUndoStack: [],
         transformRedoStack: [],
         transformSessionStart: null,
         renderTrigger: 0,
+        shortcutsPanelOpen: false,
+        effectDropdownRequested: false,
+        imageUploadRequested: false,
+        templatesPanelOpen: false,
 
         // =====================================================================
         // Layer CRUD
@@ -479,6 +523,17 @@ export const useEditorStore = create<EditorStore>()(
             const layer = newLayers[id];
             if (!layer) return state;
 
+            // Snapshot for undo
+            const snapshot: LayerUndoSnapshot = {
+                layers: { ...state.layers },
+                layerOrder: [...state.layerOrder],
+                activeLayerId: state.activeLayerId,
+            };
+            const nextUndoStack = [...state.layerUndoStack, snapshot];
+            if (nextUndoStack.length > MAX_TRANSFORM_HISTORY) {
+                nextUndoStack.splice(0, nextUndoStack.length - MAX_TRANSFORM_HISTORY);
+            }
+
             // Recursively remove children if group
             const toRemove = [id];
             const collectChildren = (layerId: string) => {
@@ -506,6 +561,8 @@ export const useEditorStore = create<EditorStore>()(
                 layers: newLayers,
                 layerOrder: state.layerOrder.filter(lid => !toRemove.includes(lid)),
                 activeLayerId: state.activeLayerId === id ? null : state.activeLayerId,
+                layerUndoStack: nextUndoStack,
+                layerRedoStack: [],
                 renderTrigger: state.renderTrigger + 1,
             };
         }),
@@ -574,7 +631,8 @@ export const useEditorStore = create<EditorStore>()(
             };
         }),
 
-        setActiveLayer: (id) => set({ activeLayerId: id }),
+        setActiveLayer: (id) => set({ activeLayerId: id, activeEffectId: null }),
+        setActiveEffect: (effectId) => set({ activeEffectId: effectId }),
 
         toggleLayerVisibility: (id) => set((state) => {
             const layer = state.layers[id];
@@ -780,6 +838,7 @@ export const useEditorStore = create<EditorStore>()(
                     ...state.layers,
                     [layerId]: { ...layer, effects: layer.effects.filter(e => e.id !== effectId) },
                 },
+                activeEffectId: state.activeEffectId === effectId ? null : state.activeEffectId,
                 renderTrigger: state.renderTrigger + 1,
             };
         }),
@@ -1028,6 +1087,54 @@ export const useEditorStore = create<EditorStore>()(
         }),
 
         // =====================================================================
+        // Layer undo/redo (destructive ops like delete)
+        // =====================================================================
+
+        undoLayerAction: () => set((state) => {
+            if (state.layerUndoStack.length === 0) return state;
+            const snapshot = state.layerUndoStack[state.layerUndoStack.length - 1];
+            const currentSnapshot: LayerUndoSnapshot = {
+                layers: state.layers,
+                layerOrder: state.layerOrder,
+                activeLayerId: state.activeLayerId,
+            };
+            const nextRedo = [...state.layerRedoStack, currentSnapshot];
+            if (nextRedo.length > MAX_TRANSFORM_HISTORY) {
+                nextRedo.splice(0, nextRedo.length - MAX_TRANSFORM_HISTORY);
+            }
+            return {
+                layers: snapshot.layers,
+                layerOrder: snapshot.layerOrder,
+                activeLayerId: snapshot.activeLayerId,
+                layerUndoStack: state.layerUndoStack.slice(0, -1),
+                layerRedoStack: nextRedo,
+                renderTrigger: state.renderTrigger + 1,
+            };
+        }),
+
+        redoLayerAction: () => set((state) => {
+            if (state.layerRedoStack.length === 0) return state;
+            const snapshot = state.layerRedoStack[state.layerRedoStack.length - 1];
+            const currentSnapshot: LayerUndoSnapshot = {
+                layers: state.layers,
+                layerOrder: state.layerOrder,
+                activeLayerId: state.activeLayerId,
+            };
+            const nextUndo = [...state.layerUndoStack, currentSnapshot];
+            if (nextUndo.length > MAX_TRANSFORM_HISTORY) {
+                nextUndo.splice(0, nextUndo.length - MAX_TRANSFORM_HISTORY);
+            }
+            return {
+                layers: snapshot.layers,
+                layerOrder: snapshot.layerOrder,
+                activeLayerId: snapshot.activeLayerId,
+                layerUndoStack: nextUndo,
+                layerRedoStack: state.layerRedoStack.slice(0, -1),
+                renderTrigger: state.renderTrigger + 1,
+            };
+        }),
+
+        // =====================================================================
         // Viewport
         // =====================================================================
 
@@ -1177,6 +1284,8 @@ export const useEditorStore = create<EditorStore>()(
                 canvasHeight: H,
                 canvasBgColor: '#000000',
                 canvasTransparent: false,
+                layerUndoStack: [],
+                layerRedoStack: [],
                 transformUndoStack: [],
                 transformRedoStack: [],
                 transformSessionStart: null,
@@ -1189,5 +1298,132 @@ export const useEditorStore = create<EditorStore>()(
         // =====================================================================
 
         triggerRender: () => set((state) => ({ renderTrigger: state.renderTrigger + 1 })),
+
+        // UI panels
+        setShortcutsPanelOpen: (open) => set({ shortcutsPanelOpen: open }),
+        requestEffectDropdown: () => set({ effectDropdownRequested: true }),
+        clearEffectDropdownRequest: () => set({ effectDropdownRequested: false }),
+        requestImageUpload: () => set({ imageUploadRequested: true }),
+        clearImageUploadRequest: () => set({ imageUploadRequested: false }),
+        setTemplatesPanelOpen: (open) => set({ templatesPanelOpen: open }),
+
+        // =====================================================================
+        // Project persistence
+        // =====================================================================
+
+        loadProject: (state) => {
+            // Restore layerCounter from loaded layers
+            const maxNum = Object.values(state.layers ?? {}).reduce((max, layer) => {
+                const match = layer.name.match(/(?:Image|Solid|Adjustment|Group|Mask)\s+(\d+)/);
+                return match ? Math.max(max, parseInt(match[1], 10)) : max;
+            }, 0);
+            layerCounter = maxNum;
+
+            set({
+                layers: state.layers ?? {},
+                layerOrder: state.layerOrder ?? [],
+                activeLayerId: state.activeLayerId ?? null,
+                activeEffectId: state.activeEffectId ?? null,
+                canvasWidth: state.canvasWidth ?? DEFAULT_CANVAS_WIDTH,
+                canvasHeight: state.canvasHeight ?? DEFAULT_CANVAS_HEIGHT,
+                canvasBgColor: state.canvasBgColor ?? '#000000',
+                canvasTransparent: state.canvasTransparent ?? true,
+                asciiImportFontId: state.asciiImportFontId ?? DEFAULT_ASCII_IMPORT_FONT_ID,
+                zoom: 1,
+                panX: 0,
+                panY: 0,
+                layerUndoStack: [],
+                layerRedoStack: [],
+                transformUndoStack: [],
+                transformRedoStack: [],
+                transformSessionStart: null,
+                renderTrigger: Date.now(),
+                shortcutsPanelOpen: false,
+                effectDropdownRequested: false,
+                imageUploadRequested: false,
+                templatesPanelOpen: false,
+            });
+        },
+
+        resetEditor: () => {
+            layerCounter = 0;
+            set({
+                layers: {},
+                layerOrder: [],
+                activeLayerId: null,
+                activeEffectId: null,
+                canvasWidth: DEFAULT_CANVAS_WIDTH,
+                canvasHeight: DEFAULT_CANVAS_HEIGHT,
+                canvasBgColor: '#000000',
+                canvasTransparent: true,
+                asciiImportFontId: DEFAULT_ASCII_IMPORT_FONT_ID,
+                zoom: 1,
+                panX: 0,
+                panY: 0,
+                layerUndoStack: [],
+                layerRedoStack: [],
+                transformUndoStack: [],
+                transformRedoStack: [],
+                transformSessionStart: null,
+                renderTrigger: Date.now(),
+                shortcutsPanelOpen: false,
+                effectDropdownRequested: false,
+                imageUploadRequested: false,
+                templatesPanelOpen: false,
+            });
+        },
+    }), {
+        name: 'effects-tool-session',
+        storage: editorSessionStorage,
+        version: 1,
+        partialize: (state): PersistedEditorState => ({
+            layers: state.layers,
+            layerOrder: state.layerOrder,
+            activeLayerId: state.activeLayerId,
+            activeEffectId: state.activeEffectId,
+            canvasWidth: state.canvasWidth,
+            canvasHeight: state.canvasHeight,
+            canvasBgColor: state.canvasBgColor,
+            canvasTransparent: state.canvasTransparent,
+            asciiImportFontId: state.asciiImportFontId,
+            zoom: state.zoom,
+            panX: state.panX,
+            panY: state.panY,
+        }),
+        merge: (persisted, current) => {
+            if (!persisted) return current;
+            return {
+                ...current,
+                ...(persisted as Partial<PersistedEditorState>),
+                // Force ephemeral state to defaults
+                renderTrigger: 0,
+                layerUndoStack: [],
+                layerRedoStack: [],
+                transformUndoStack: [],
+                transformRedoStack: [],
+                transformSessionStart: null,
+                shortcutsPanelOpen: false,
+                effectDropdownRequested: false,
+                imageUploadRequested: false,
+                templatesPanelOpen: false,
+            };
+        },
+        onRehydrateStorage: () => {
+            return (state, error) => {
+                if (error) {
+                    console.warn('[Persist] Rehydration error:', error);
+                    return;
+                }
+                if (state) {
+                    // Restore layerCounter to avoid duplicate layer names
+                    const maxNum = Object.values(state.layers).reduce((max, layer) => {
+                        const match = layer.name.match(/(?:Image|Solid|Adjustment|Group|Mask)\s+(\d+)/);
+                        return match ? Math.max(max, parseInt(match[1], 10)) : max;
+                    }, 0);
+                    layerCounter = maxNum;
+                    state.triggerRender();
+                }
+            };
+        },
     }))
 );

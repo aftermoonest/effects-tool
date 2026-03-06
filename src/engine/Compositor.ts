@@ -24,6 +24,9 @@ export class Compositor {
     private fboF: Framebuffer2D; // Baseline snapshot for mask-scoped rendering
     private fboG: Framebuffer2D; // Mask-segment working composite
 
+    // Stylization & Generative Art effects replace the image instead of overlaying
+    private static GENERATIVE_EFFECT_TYPES = new Set(['ascii', 'dithering', 'stippling', 'cellular_automata']);
+
     // Blend mode string → shader int mapping
     private static BLEND_MODE_MAP: Record<string, number> = {
         'normal': 0, 'multiply': 1, 'screen': 2, 'overlay': 3,
@@ -435,17 +438,12 @@ export class Compositor {
         }
 
         // 2. Blend original (currentInputTex) with effect (effectFbo) into writeFbo.
-        // ASCII and dither cutout modes bypass blend-over-original so the base image
-        // never bleeds under transparent output pixels.
+        // Stylization & Generative Art effects replace the image entirely (no original
+        // bleeds underneath) — they transform the image rather than overlay it.
         this.regl.clear({ color: [0, 0, 0, 0], framebuffer: writeFbo });
-        const isAsciiCutout = effect.type === 'ascii'
-            && (normalizedParams.background === false || normalizedParams.removeBgV2 === true);
-        const isDitherCutout = effect.type === 'dithering'
-            && normalizedParams.useColorMode !== true
-            && String(normalizedParams.colorMode ?? 'monochrome') === 'monochrome'
-            && (normalizedParams.removeBgV2 === true || normalizedParams.transparentBg === true);
+        const isGenerativeEffect = Compositor.GENERATIVE_EFFECT_TYPES.has(effect.type);
 
-        if (isAsciiCutout || isDitherCutout) {
+        if (isGenerativeEffect) {
             this.drawCommands['blit_fbo_to_fbo']({
                 tInput: effectFbo,
                 outFbo: writeFbo

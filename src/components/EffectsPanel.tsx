@@ -306,6 +306,8 @@ const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
     const updateEffectParam = useEditorStore((s) => s.updateEffectParam);
     const setEffectBlendMode = useEditorStore((s) => s.setEffectBlendMode);
     const setEffectOpacity = useEditorStore((s) => s.setEffectOpacity);
+    const setActiveEffect = useEditorStore((s) => s.setActiveEffect);
+    const isActive = useEditorStore((s) => s.activeEffectId === effect.id);
     const [isExpanded, setIsExpanded] = useState(false);
 
     const style = {
@@ -466,8 +468,8 @@ const SortableEffectCard = ({ effect, layerId }: SortableEffectCardProps) => {
             `}
         >
             <div
-                className="flex items-center gap-2 py-3 pr-2 pl-3 cursor-pointer hover:bg-secondary/30 border-l-2 border-l-transparent"
-                onClick={() => setIsExpanded(!isExpanded)}
+                className={`flex items-center gap-2 py-3 pr-2 pl-3 cursor-pointer hover:bg-secondary/30 border-l-2 ${isActive ? 'border-l-primary bg-secondary/20' : 'border-l-transparent'}`}
+                onClick={() => { setActiveEffect(effect.id); setIsExpanded(!isExpanded); }}
             >
                 <button
                     className="shrink-0 p-1 text-muted-foreground/40 hover:text-muted-foreground cursor-grab active:cursor-grabbing"
@@ -575,6 +577,8 @@ export const EffectsPanel = () => {
     const activeLayerId = useEditorStore((s) => s.activeLayerId);
     const addEffectToLayer = useEditorStore((s) => s.addEffectToLayer);
     const reorderEffects = useEditorStore((s) => s.reorderEffects);
+    const effectDropdownRequested = useEditorStore((s) => s.effectDropdownRequested);
+    const clearEffectDropdownRequest = useEditorStore((s) => s.clearEffectDropdownRequest);
 
     const activeLayer = activeLayerId ? layers[activeLayerId] : null;
 
@@ -615,6 +619,13 @@ export const EffectsPanel = () => {
             requestAnimationFrame(() => searchInputRef.current?.focus());
         }
     }, [effectMenuOpen]);
+
+    useEffect(() => {
+        if (effectDropdownRequested) {
+            clearEffectDropdownRequest();
+            setEffectMenuOpen(true);
+        }
+    }, [effectDropdownRequested, clearEffectDropdownRequest]);
 
     const sensors = useSensors(useSensor(PointerSensor, {
         activationConstraint: { distance: 4 },

@@ -1,8 +1,7 @@
 import { useEditorStore } from '@/store/editorStore';
 import type { Layer } from '@/store/editorStore';
 import { Compositor } from '@/engine/Compositor';
-import { importLayerImageFromFile, LAYER_UPLOAD_ACCEPT } from '@/lib/importLayerFile';
-import { Upload, Plus, Minus, Maximize, ScanLine, Undo2, Redo2 } from 'lucide-react';
+import { Plus, Minus, Maximize, ScanLine, Undo2, Redo2 } from 'lucide-react';
 import Moveable from 'react-moveable';
 import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react';
 
@@ -15,12 +14,9 @@ interface BoxRect {
 
 const MIN_LAYER_SIZE = 8;
 
-const isTextInputTarget = (target: EventTarget | null) => {
-    const node = target as HTMLElement | null;
-    if (!node) return false;
-    const tag = node.tagName.toLowerCase();
-    return tag === 'input' || tag === 'textarea' || tag === 'select' || node.isContentEditable;
-};
+import { isTextInputTarget } from '@/lib/utils';
+import { importLayerImageFromFile } from '@/lib/importLayerFile';
+import { Upload } from 'lucide-react';
 
 const getVisibleImageLayers = (layers: Record<string, Layer>, layerOrder: string[]): Layer[] => {
     const ordered: Layer[] = [];
@@ -85,7 +81,6 @@ export const CanvasViewport = () => {
     const canUndo = useEditorStore((s) => s.transformUndoStack.length > 0);
     const canRedo = useEditorStore((s) => s.transformRedoStack.length > 0);
 
-    const fileInputRef = useRef<HTMLInputElement>(null);
     const webglCanvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const overlayRef = useRef<HTMLDivElement>(null);
@@ -100,6 +95,8 @@ export const CanvasViewport = () => {
     const [isAltDown, setIsAltDown] = useState(false);
     const [isMetaCtrlDown, setIsMetaCtrlDown] = useState(false);
     const [isPanning, setIsPanning] = useState(false);
+    const [isDragOver, setIsDragOver] = useState(false);
+    const dragCounterRef = useRef(0);
 
     const panPointerIdRef = useRef<number | null>(null);
     const panStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
@@ -214,51 +211,6 @@ export const CanvasViewport = () => {
                 e.preventDefault();
                 setIsSpaceDown(true);
             }
-
-            if (isTextInputTarget(e.target)) return;
-
-            const state = useEditorStore.getState();
-
-            const key = e.key.toLowerCase();
-            if ((e.metaKey || e.ctrlKey) && key === 'z') {
-                e.preventDefault();
-                if (e.shiftKey) {
-                    state.redoTransform();
-                } else {
-                    state.undoTransform();
-                }
-                return;
-            }
-
-            if ((e.metaKey || e.ctrlKey) && key === 'y') {
-                e.preventDefault();
-                state.redoTransform();
-                return;
-            }
-
-            if (!state.activeLayerId) return;
-            const activeLayer = state.layers[state.activeLayerId];
-            if (!activeLayer || activeLayer.kind !== 'image') return;
-
-            const step = e.shiftKey ? 10 : 1;
-            let dx = 0;
-            let dy = 0;
-
-            if (e.key === 'ArrowLeft') dx = -step;
-            if (e.key === 'ArrowRight') dx = step;
-            if (e.key === 'ArrowUp') dy = -step;
-            if (e.key === 'ArrowDown') dy = step;
-
-            if (dx === 0 && dy === 0) return;
-
-            e.preventDefault();
-            state.beginTransformSession();
-            state.setLayerTransform(
-                activeLayer.id,
-                { x: activeLayer.x + dx, y: activeLayer.y + dy },
-                { minSize: MIN_LAYER_SIZE }
-            );
-            state.commitTransformSession();
         };
 
         const handleKeyUp = (e: KeyboardEvent) => {
@@ -287,23 +239,6 @@ export const CanvasViewport = () => {
             window.removeEventListener('blur', handleBlur);
         };
     }, []);
-
-    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-
-        try {
-            const { image, name, asciiTextSource } = await importLayerImageFromFile(file, { asciiFontId: asciiImportFontId });
-            addImageLayer(image, name, {
-                asciiTextSource,
-                asciiTextFontId: asciiTextSource ? asciiImportFontId : undefined,
-            });
-        } catch (error) {
-            console.error('[Upload] Failed to import file:', error);
-        } finally {
-            e.target.value = '';
-        }
-    };
 
     const canvasScreenRect = useMemo<BoxRect>(() => {
         const width = canvasWidth * zoom;
@@ -422,12 +357,50 @@ export const CanvasViewport = () => {
         fitToScreen(rect.width, rect.height);
     };
 
+    const onDragEnter = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        dragCounterRef.current++;
+        if (e.dataTransfer.types.includes('Files')) setIsDragOver(true);
+    }, []);
+
+    const onDragOver = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+    }, []);
+
+    const onDragLeave = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        dragCounterRef.current--;
+        if (dragCounterRef.current <= 0) {
+            dragCounterRef.current = 0;
+            setIsDragOver(false);
+        }
+    }, []);
+
+    const onDrop = useCallback(async (e: React.DragEvent) => {
+        e.preventDefault();
+        dragCounterRef.current = 0;
+        setIsDragOver(false);
+
+        const files = Array.from(e.dataTransfer.files);
+        for (const file of files) {
+            try {
+                const { image, name, asciiTextSource } = await importLayerImageFromFile(file, { asciiFontId: asciiImportFontId });
+                addImageLayer(image, name, {
+                    asciiTextSource,
+                    asciiTextFontId: asciiTextSource ? asciiImportFontId : undefined,
+                });
+            } catch {
+                // Skip unsupported files silently
+            }
+        }
+    }, [addImageLayer, asciiImportFontId]);
+
     const cursorClass = useMemo(() => {
-        if (!hasImage) return '';
         if (isPanning) return 'cursor-grabbing';
         if (isSpaceDown) return 'cursor-grab';
         return '';
-    }, [hasImage, isPanning, isSpaceDown]);
+    }, [isPanning, isSpaceDown]);
 
     const zoomPercent = Math.round(zoom * 100);
 
@@ -435,24 +408,26 @@ export const CanvasViewport = () => {
         <div className="flex-1 relative flex flex-col overflow-hidden">
             <div
                 ref={containerRef}
+                data-canvas-container
                 className={`flex-1 relative overflow-hidden ${cursorClass}`}
-                onPointerDown={hasImage ? onPanPointerDown : undefined}
-                onPointerMove={hasImage ? onPanPointerMove : undefined}
-                onPointerUp={hasImage ? endPan : undefined}
-                onPointerCancel={hasImage ? endPan : undefined}
+                onPointerDown={onPanPointerDown}
+                onPointerMove={onPanPointerMove}
+                onPointerUp={endPan}
+                onPointerCancel={endPan}
+                onDragEnter={onDragEnter}
+                onDragOver={onDragOver}
+                onDragLeave={onDragLeave}
+                onDrop={onDrop}
             >
                 <div
                     className="absolute"
                     style={{
-                        width: hasImage ? canvasWidth : 1,
-                        height: hasImage ? canvasHeight : 1,
+                        width: canvasWidth,
+                        height: canvasHeight,
                         left: '50%',
                         top: '50%',
-                        transform: hasImage
-                            ? `translate(-50%, -50%) translate(${panX}px, ${panY}px) scale(${zoom})`
-                            : 'translate(-50%, -50%)',
+                        transform: `translate(-50%, -50%) translate(${panX}px, ${panY}px) scale(${zoom})`,
                         transformOrigin: 'center center',
-                        visibility: hasImage ? 'visible' : 'hidden',
                     }}
                 >
                     <canvas
@@ -460,8 +435,8 @@ export const CanvasViewport = () => {
                         ref={webglCanvasRef}
                         className="block"
                         style={{
-                            width: hasImage ? canvasWidth : 1,
-                            height: hasImage ? canvasHeight : 1,
+                            width: canvasWidth,
+                            height: canvasHeight,
                             imageRendering: zoom > 2 ? 'pixelated' : 'auto',
                             backgroundImage: canvasTransparent ? 'repeating-conic-gradient(#1f1f1f 0% 25%, #2a2a2a 0% 50%)' : 'none',
                             backgroundSize: '16px 16px',
@@ -471,8 +446,8 @@ export const CanvasViewport = () => {
                         id="ascii-canvas"
                         className="absolute inset-0 pointer-events-none opacity-0"
                         style={{
-                            width: hasImage ? canvasWidth : 1,
-                            height: hasImage ? canvasHeight : 1,
+                            width: canvasWidth,
+                            height: canvasHeight,
                         }}
                     />
                 </div>
@@ -657,28 +632,17 @@ export const CanvasViewport = () => {
                     </div>
                 )}
 
-                {!hasImage && (
-                    <div
-                        className="absolute inset-0 flex flex-col items-center justify-center cursor-pointer hover:bg-secondary/10 transition-colors"
-                        onClick={() => fileInputRef.current?.click()}
-                    >
-                        <input
-                            type="file"
-                            ref={fileInputRef}
-                            className="hidden"
-                            accept={LAYER_UPLOAD_ACCEPT}
-                            onChange={handleFileUpload}
-                        />
-                        <div className="text-center space-y-4 uppercase tracking-wider">
-                            <Upload size={32} className="text-primary mx-auto mb-4" />
-                            <h3 className="text-sm font-bold">Input Image Source</h3>
-                            <p className="text-xs text-muted-foreground font-mono">Click to load data.</p>
+                {isDragOver && (
+                    <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/60 backdrop-blur-sm border-2 border-dashed border-primary pointer-events-none">
+                        <div className="flex flex-col items-center gap-2 text-primary">
+                            <Upload size={32} />
+                            <span className="font-mono text-xs uppercase tracking-widest font-bold">Drop Image</span>
                         </div>
                     </div>
                 )}
+
             </div>
-            {hasImage && (
-                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-0 bg-card/90 backdrop-blur-sm border border-border text-xs font-mono z-30 pointer-events-auto">
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-0 bg-card/90 backdrop-blur-sm border border-border text-xs font-mono z-30 pointer-events-auto">
                     <button
                         onClick={undoTransform}
                         disabled={!canUndo}
@@ -729,7 +693,6 @@ export const CanvasViewport = () => {
                         <ScanLine size={14} />
                     </button>
                 </div>
-            )}
         </div>
     );
 };

@@ -1,6 +1,7 @@
+import { useState, useRef, useEffect } from 'react';
 import { useEditorStore } from '@/store/editorStore';
-import { useState } from 'react';
-import { ChevronDown, LayoutTemplate } from 'lucide-react';
+import { useDashboardStore } from '@/store/dashboardStore';
+import { ArrowLeft, ChevronDown, LayoutTemplate } from 'lucide-react';
 import { Button } from './ui/button';
 import { NumberInput } from './ui/number-input';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from './ui/dropdown-menu';
@@ -23,7 +24,32 @@ export const CanvasHeader = () => {
     const setCanvasSize = useEditorStore(s => s.setCanvasSize);
     const setCanvasBg = useEditorStore(s => s.setCanvasBg);
 
+    const activeProjectId = useDashboardStore(s => s.activeProjectId);
+    const projects = useDashboardStore(s => s.projects);
+    const hasUnsavedChanges = useDashboardStore(s => s.hasUnsavedChanges);
+    const isSaving = useDashboardStore(s => s.isSaving);
+    const openDashboard = useDashboardStore(s => s.openDashboard);
+    const renameProject = useDashboardStore(s => s.renameProject);
+    const saveCurrentProject = useDashboardStore(s => s.saveCurrentProject);
 
+    const activeProject = projects.find(p => p.id === activeProjectId);
+    const projectName = activeProject?.name ?? 'Untitled';
+
+    const [isRenaming, setIsRenaming] = useState(false);
+    const [renameValue, setRenameValue] = useState(projectName);
+    const renameInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (isRenaming) renameInputRef.current?.select();
+    }, [isRenaming]);
+
+    const handleRename = () => {
+        const trimmed = renameValue.trim();
+        if (trimmed && trimmed !== projectName && activeProjectId) {
+            renameProject(activeProjectId, trimmed);
+        }
+        setIsRenaming(false);
+    };
 
     const hasImageLayer = layerOrder.some(id => {
         const kind = layers[id]?.kind;
@@ -43,12 +69,66 @@ export const CanvasHeader = () => {
         link.click();
     };
 
-    const [showTemplates, setShowTemplates] = useState(false);
+    const showTemplates = useEditorStore(s => s.templatesPanelOpen);
+    const setShowTemplates = useEditorStore(s => s.setTemplatesPanelOpen);
+
+    // Save indicator
+    const saveStatus = isSaving ? 'saving' : hasUnsavedChanges ? 'unsaved' : 'saved';
 
     return (
         <header className="h-14 border-b border-border flex items-center justify-between px-6 bg-card shrink-0 uppercase tracking-widest text-xs font-bold w-full">
-            <div className="flex items-center gap-4">
-                <span className="text-primary font-mono text-lg leading-none">AF /  Effects</span>
+            <div className="flex items-center gap-3">
+                {/* Back to dashboard */}
+                <button
+                    onClick={openDashboard}
+                    className="text-muted-foreground hover:text-foreground transition-colors p-1"
+                    title="Back to projects"
+                >
+                    <ArrowLeft size={16} />
+                </button>
+
+                <div className="w-px h-4 bg-border" />
+
+                <span className="text-primary font-mono text-lg leading-none">AF / Effects</span>
+
+                <div className="w-px h-4 bg-border" />
+
+                {/* Project name */}
+                {isRenaming ? (
+                    <input
+                        ref={renameInputRef}
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onBlur={handleRename}
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleRename(); if (e.key === 'Escape') setIsRenaming(false); }}
+                        className="bg-transparent border border-primary/50 px-2 py-0.5 text-xs font-mono outline-none normal-case tracking-normal"
+                        autoFocus
+                    />
+                ) : (
+                    <button
+                        onClick={() => { setRenameValue(projectName); setIsRenaming(true); }}
+                        className="text-xs font-mono text-muted-foreground hover:text-foreground transition-colors normal-case tracking-normal"
+                    >
+                        {projectName}
+                    </button>
+                )}
+
+                {/* Save indicator */}
+                <div className="flex items-center gap-1.5" title={saveStatus === 'saving' ? 'Saving...' : saveStatus === 'unsaved' ? 'Unsaved changes' : 'All changes saved'}>
+                    <div className={`w-1.5 h-1.5 rounded-full ${
+                        saveStatus === 'saving' ? 'bg-yellow-400 animate-pulse' :
+                        saveStatus === 'unsaved' ? 'bg-orange-400' :
+                        'bg-green-500'
+                    }`} />
+                    {saveStatus === 'unsaved' && (
+                        <button
+                            onClick={saveCurrentProject}
+                            className="text-[10px] text-muted-foreground hover:text-foreground transition-colors normal-case tracking-normal"
+                        >
+                            Save
+                        </button>
+                    )}
+                </div>
             </div>
 
             {/* Canvas Editor */}

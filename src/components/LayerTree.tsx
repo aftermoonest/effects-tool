@@ -33,6 +33,7 @@ import {
     Copy,
     Pencil,
     MoreHorizontal,
+    Keyboard,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -294,6 +295,9 @@ export const LayerTree = () => {
     const addGroup = useEditorStore(s => s.addGroup);
     const addMaskLayer = useEditorStore(s => s.addMaskLayer);
     const renameLayer = useEditorStore(s => s.renameLayer);
+    const imageUploadRequested = useEditorStore(s => s.imageUploadRequested);
+    const clearImageUploadRequest = useEditorStore(s => s.clearImageUploadRequest);
+    const setShortcutsPanelOpen = useEditorStore(s => s.setShortcutsPanelOpen);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -319,6 +323,13 @@ export const LayerTree = () => {
     const cancelRename = useCallback(() => {
         setRenamingId(null);
     }, []);
+
+    useEffect(() => {
+        if (imageUploadRequested) {
+            clearImageUploadRequest();
+            fileInputRef.current?.click();
+        }
+    }, [imageUploadRequested, clearImageUploadRequest]);
 
     const [width, setWidth] = useState(256);
     const [isMinimized, setIsMinimized] = useState(false);
@@ -587,6 +598,16 @@ export const LayerTree = () => {
                         <Palette size={14} className="text-rose-400" />
                     </Button>
                 </div>
+            )}
+            {!isMinimized && (
+                <button
+                    onClick={() => setShortcutsPanelOpen(true)}
+                    className="flex items-center justify-center gap-1.5 w-full py-1.5 text-muted-foreground/40 hover:text-muted-foreground text-[9px] uppercase tracking-wider cursor-pointer transition-colors border-t border-border/50"
+                    title="Keyboard shortcuts (?)"
+                >
+                    <Keyboard size={10} />
+                    Shortcuts
+                </button>
             )}
         </div>
     );
